@@ -20,6 +20,8 @@ import {
   ImageIcon,
   Loader2,
   MessageSquare,
+  Monitor,
+  Moon,
   PanelLeftClose,
   PanelLeftOpen,
   Paperclip,
@@ -30,6 +32,7 @@ import {
   Send,
   Settings,
   Share2,
+  Sun,
   ThumbsDown,
   ThumbsUp,
   Trash2,
@@ -54,7 +57,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import { fetchModels, runAgentStream, type AgentMessage, type ApiModel } from "@/lib/agent-api";
+import { fetchModels, runAgentStream, resolveDeclaredTools, type AgentMessage, type ApiModel } from "@/lib/agent-api";
 
 type ThemePreset = {
   key: string;
@@ -62,7 +65,12 @@ type ThemePreset = {
   primary: string;
   secondary: string;
   accent: string;
+  // 深色模式下的主题配色：primary 保持主题色，secondary/accent 用暗色调避免刺眼。
+  dark: { primary: string; secondary: string; accent: string };
 };
+
+// 外观模式：system=跟随系统、light=浅色、dark=深色。默认跟随系统。
+type ThemeMode = "system" | "light" | "dark";
 
 type MessageStatus = "success" | "sending" | "send_failed" | "recv_failed";
 
@@ -123,15 +131,25 @@ type StoredChatState = {
 };
 
 const CHAT_STORAGE_KEY = "aether-ai-chat-state";
+// 外观模式独立持久化，与会话状态解耦（也方便 index.html 首屏脚本只读该键避免闪烁）。
+const THEME_MODE_KEY = "aether-ai-theme-mode";
+// 主题色独立持久化：key 对应 THEMES 中的 theme.key，读取失败/非法时回退到默认蓝色。
+const THEME_KEY = "aether-ai-theme-key";
 const AGENT_INSTRUCTIONS = "你是 AetherAI 内置助手，请用中文回复，回答要清晰、准确、可执行。";
 
+const THEME_MODES: { key: ThemeMode; label: string; icon: LucideIcon }[] = [
+  { key: "system", label: "跟随系统", icon: Monitor },
+  { key: "light", label: "浅色", icon: Sun },
+  { key: "dark", label: "深色", icon: Moon },
+];
+
 const THEMES: ThemePreset[] = [
-  { key: "blue", label: "蓝色", primary: "#1a56db", secondary: "#eef2ff", accent: "#dbeafe" },
-  { key: "violet", label: "紫色", primary: "#7c3aed", secondary: "#f5f3ff", accent: "#ede9fe" },
-  { key: "rose", label: "玫瑰", primary: "#e11d48", secondary: "#fff1f2", accent: "#ffe4e6" },
-  { key: "emerald", label: "翠绿", primary: "#059669", secondary: "#ecfdf5", accent: "#d1fae5" },
-  { key: "amber", label: "琥珀", primary: "#d97706", secondary: "#fffbeb", accent: "#fef3c7" },
-  { key: "slate", label: "石墨", primary: "#334155", secondary: "#f1f5f9", accent: "#e2e8f0" },
+  { key: "blue", label: "蓝色", primary: "#1a56db", secondary: "#eef2ff", accent: "#dbeafe", dark: { primary: "#3b82f6", secondary: "oklch(0.3 0.08 264)", accent: "oklch(0.35 0.09 264)" } },
+  { key: "violet", label: "紫色", primary: "#7c3aed", secondary: "#f5f3ff", accent: "#ede9fe", dark: { primary: "#8b5cf6", secondary: "oklch(0.3 0.08 294)", accent: "oklch(0.35 0.09 294)" } },
+  { key: "rose", label: "玫瑰", primary: "#e11d48", secondary: "#fff1f2", accent: "#ffe4e6", dark: { primary: "#f43f5e", secondary: "oklch(0.3 0.07 10)", accent: "oklch(0.35 0.08 10)" } },
+  { key: "emerald", label: "翠绿", primary: "#059669", secondary: "#ecfdf5", accent: "#d1fae5", dark: { primary: "#10b981", secondary: "oklch(0.3 0.07 160)", accent: "oklch(0.35 0.08 160)" } },
+  { key: "amber", label: "琥珀", primary: "#d97706", secondary: "#fffbeb", accent: "#fef3c7", dark: { primary: "#f59e0b", secondary: "oklch(0.31 0.07 75)", accent: "oklch(0.36 0.08 75)" } },
+  { key: "slate", label: "石墨", primary: "#334155", secondary: "#f1f5f9", accent: "#e2e8f0", dark: { primary: "#64748b", secondary: "oklch(0.29 0.01 250)", accent: "oklch(0.34 0.01 250)" } },
 ];
 
 const QUICK_PROMPTS = [
@@ -216,16 +234,18 @@ function toAgentMessages(messages: Message[]): AgentMessage[] {
     .map(message => ({ role: message.role, content: message.content }));
 }
 
-function applyTheme(theme: ThemePreset) {
+function applyTheme(theme: ThemePreset, dark = false) {
+  // 深色模式下使用 theme.dark 配色：primary 保持主题色，secondary/accent 用暗色避免刺眼。
+  const colors = dark ? theme.dark : theme;
   const root = document.documentElement;
-  root.style.setProperty("--primary", theme.primary);
+  root.style.setProperty("--primary", colors.primary);
   root.style.setProperty("--primary-foreground", "#ffffff");
-  root.style.setProperty("--secondary", theme.secondary);
-  root.style.setProperty("--secondary-foreground", theme.primary);
-  root.style.setProperty("--accent", theme.accent);
-  root.style.setProperty("--accent-foreground", theme.primary);
-  root.style.setProperty("--ring", theme.primary);
-  root.style.setProperty("--sidebar-primary", theme.primary);
+  root.style.setProperty("--secondary", colors.secondary);
+  root.style.setProperty("--secondary-foreground", dark ? "#f8fafc" : theme.primary);
+  root.style.setProperty("--accent", colors.accent);
+  root.style.setProperty("--accent-foreground", dark ? "#f8fafc" : theme.primary);
+  root.style.setProperty("--ring", colors.primary);
+  root.style.setProperty("--sidebar-primary", colors.primary);
 }
 
 function nodeToText(node: ReactNode): string {
@@ -323,24 +343,24 @@ const MemoMarkdown = memo(function MemoMarkdown({ content, components }: { conte
   return <div>{renderMarkdown(content, components)}</div>;
 });
 
-// 思考过程的 Markdown 组件映射：与正文（MARKDOWN_COMPONENTS）区分，整体走淡紫色调。
+// 思考过程的 Markdown 组件映射：与正文（MARKDOWN_COMPONENTS）区分，整体走淡紫色调，深色模式下同步加深。
 const THINKING_COMPONENTS: Components = {
-  h1: ({ node: _node, ...props }) => <h1 className="mb-1 mt-2 text-sm font-semibold text-violet-900" {...props} />,
-  h2: ({ node: _node, ...props }) => <h2 className="mb-1 mt-2 text-sm font-semibold text-violet-900" {...props} />,
-  h3: ({ node: _node, ...props }) => <h3 className="mb-1 mt-2 text-sm font-semibold text-violet-900" {...props} />,
-  h4: ({ node: _node, ...props }) => <h4 className="mb-1 mt-2 text-sm font-semibold text-violet-900" {...props} />,
-  h5: ({ node: _node, ...props }) => <h5 className="mb-1 mt-2 text-sm font-semibold text-violet-900" {...props} />,
-  h6: ({ node: _node, ...props }) => <h6 className="mb-1 mt-2 text-sm font-semibold text-violet-900" {...props} />,
-  p: ({ node: _node, ...props }) => <p className="mb-1 text-sm leading-relaxed text-violet-700/80" {...props} />,
-  a: ({ node: _node, ...props }) => <a target="_blank" rel="noreferrer noopener" className="text-violet-600 underline underline-offset-2 hover:opacity-80" {...props} />,
-  strong: ({ node: _node, ...props }) => <strong className="font-semibold text-violet-900" {...props} />,
-  em: ({ node: _node, ...props }) => <em className="italic text-violet-700/80" {...props} />,
-  del: ({ node: _node, ...props }) => <del className="text-violet-500" {...props} />,
+  h1: ({ node: _node, ...props }) => <h1 className="mb-1 mt-2 text-sm font-semibold text-violet-900 dark:text-violet-100" {...props} />,
+  h2: ({ node: _node, ...props }) => <h2 className="mb-1 mt-2 text-sm font-semibold text-violet-900 dark:text-violet-100" {...props} />,
+  h3: ({ node: _node, ...props }) => <h3 className="mb-1 mt-2 text-sm font-semibold text-violet-900 dark:text-violet-100" {...props} />,
+  h4: ({ node: _node, ...props }) => <h4 className="mb-1 mt-2 text-sm font-semibold text-violet-900 dark:text-violet-100" {...props} />,
+  h5: ({ node: _node, ...props }) => <h5 className="mb-1 mt-2 text-sm font-semibold text-violet-900 dark:text-violet-100" {...props} />,
+  h6: ({ node: _node, ...props }) => <h6 className="mb-1 mt-2 text-sm font-semibold text-violet-900 dark:text-violet-100" {...props} />,
+  p: ({ node: _node, ...props }) => <p className="mb-1 text-sm leading-relaxed text-violet-700/80 dark:text-violet-300/80" {...props} />,
+  a: ({ node: _node, ...props }) => <a target="_blank" rel="noreferrer noopener" className="text-violet-600 underline underline-offset-2 hover:opacity-80 dark:text-violet-400" {...props} />,
+  strong: ({ node: _node, ...props }) => <strong className="font-semibold text-violet-900 dark:text-violet-100" {...props} />,
+  em: ({ node: _node, ...props }) => <em className="italic text-violet-700/80 dark:text-violet-300/80" {...props} />,
+  del: ({ node: _node, ...props }) => <del className="text-violet-500 dark:text-violet-400" {...props} />,
   ul: ({ node: _node, ...props }) => <ul className="my-2 list-disc space-y-1.5 pl-5" {...props} />,
   ol: ({ node: _node, ...props }) => <ol className="my-2 list-decimal space-y-1.5 pl-5" {...props} />,
-  li: ({ node: _node, ...props }) => <li className="text-sm leading-relaxed text-violet-700/80" {...props} />,
-  blockquote: ({ node: _node, ...props }) => <blockquote className="my-2 border-l-2 border-violet-400/50 pl-3 italic text-violet-600" {...props} />,
-  hr: ({ node: _node, ...props }) => <hr className="my-3 border-violet-200" {...props} />,
+  li: ({ node: _node, ...props }) => <li className="text-sm leading-relaxed text-violet-700/80 dark:text-violet-300/80" {...props} />,
+  blockquote: ({ node: _node, ...props }) => <blockquote className="my-2 border-l-2 border-violet-400/50 pl-3 italic text-violet-600 dark:border-violet-500/50 dark:text-violet-300" {...props} />,
+  hr: ({ node: _node, ...props }) => <hr className="my-3 border-violet-200 dark:border-violet-800/40" {...props} />,
   img: ({ node: _node, alt, ...props }) => {
     const { openPreview } = useContext(PreviewContext);
     return (
@@ -352,21 +372,21 @@ const THINKING_COMPONENTS: Components = {
       />
     );
   },
-  code: ({ node: _node, ...props }) => <code className="rounded bg-violet-100 px-1.5 py-0.5 font-mono text-xs text-violet-800" {...props} />,
+  code: ({ node: _node, ...props }) => <code className="rounded bg-violet-100 px-1.5 py-0.5 font-mono text-xs text-violet-800 dark:bg-violet-900/50 dark:text-violet-200" {...props} />,
   pre: ({ node: _node, children }) => (
-    <pre className="my-2 overflow-x-auto rounded-lg border border-violet-200 bg-violet-100/60 p-2.5 font-mono text-xs leading-relaxed text-violet-800">
+    <pre className="my-2 overflow-x-auto rounded-lg border border-violet-200 bg-violet-100/60 p-2.5 font-mono text-xs leading-relaxed text-violet-800 dark:border-violet-800/40 dark:bg-violet-900/40 dark:text-violet-200">
       <code>{nodeToText(children)}</code>
     </pre>
   ),
   table: ({ node: _node, children, ...props }) => (
     <div className="my-2 overflow-x-auto">
-      <table className="w-full border-collapse text-sm text-violet-700/80" {...props}>{children}</table>
+      <table className="w-full border-collapse text-sm text-violet-700/80 dark:text-violet-300/80" {...props}>{children}</table>
     </div>
   ),
-  thead: ({ node: _node, ...props }) => <thead className="bg-violet-100/60" {...props} />,
-  th: ({ node: _node, ...props }) => <th className="border border-violet-200 px-3 py-2 text-left text-xs font-semibold text-violet-900" {...props} />,
-  td: ({ node: _node, ...props }) => <td className="border border-violet-200 px-3 py-2 align-top text-sm text-violet-700/80" {...props} />,
-  input: ({ node: _node, ...props }) => <input className="mr-1.5 accent-violet-600" disabled {...props} />,
+  thead: ({ node: _node, ...props }) => <thead className="bg-violet-100/60 dark:bg-violet-900/40" {...props} />,
+  th: ({ node: _node, ...props }) => <th className="border border-violet-200 px-3 py-2 text-left text-xs font-semibold text-violet-900 dark:border-violet-800/40 dark:text-violet-100" {...props} />,
+  td: ({ node: _node, ...props }) => <td className="border border-violet-200 px-3 py-2 align-top text-sm text-violet-700/80 dark:border-violet-800/40 dark:text-violet-300/80" {...props} />,
+  input: ({ node: _node, ...props }) => <input className="mr-1.5 accent-violet-600 dark:accent-violet-400" disabled {...props} />,
 };
 
 // 思考过程折叠块：默认展开状态由 defaultOpen 决定（最新消息默认展开），
@@ -374,13 +394,13 @@ const THINKING_COMPONENTS: Components = {
 function ThinkingBlock({ text, defaultOpen = false }: { text: string; defaultOpen?: boolean }) {
   const [open, setOpen] = useState(defaultOpen);
   return (
-    <details open={open} className="mb-2.5 overflow-hidden rounded-lg border border-violet-200 bg-violet-50/60">
-      <summary onClick={event => { event.preventDefault(); setOpen(value => !value); }} className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-left text-xs text-violet-600">
-        <Brain size={12} className="shrink-0 text-violet-500" />
+    <details open={open} className="mb-2.5 overflow-hidden rounded-lg border border-violet-200 bg-violet-50/60 dark:border-violet-800/40 dark:bg-violet-950/40">
+      <summary onClick={event => { event.preventDefault(); setOpen(value => !value); }} className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-left text-xs text-violet-600 dark:text-violet-300">
+        <Brain size={12} className="shrink-0 text-violet-500 dark:text-violet-400" />
         <span className="font-medium">思考过程</span>
         <span className="ml-auto text-xs text-muted-foreground">{open ? "收起" : "展开"}</span>
       </summary>
-      <div onClick={() => setOpen(false)} className="border-t border-violet-200 px-3 pb-3 pt-2 leading-relaxed">
+      <div onClick={() => setOpen(false)} className="border-t border-violet-200 px-3 pb-3 pt-2 leading-relaxed dark:border-violet-800/40">
         <MemoMarkdown components={THINKING_COMPONENTS} content={text} />
       </div>
     </details>
@@ -431,27 +451,27 @@ function extractGeneratedImages(result: unknown): string[] {
 function FunctionCallBlock({ calls }: { calls: FunctionCall[] }) {
   const { openPreview } = useContext(PreviewContext);
   return (
-    <div className="mb-2.5 overflow-hidden rounded-lg border border-amber-200 bg-amber-50/70">
-      <div className="flex items-center gap-2 border-b border-amber-200 px-3 py-2 text-xs font-medium text-amber-700">
+    <div className="mb-2.5 overflow-hidden rounded-lg border border-amber-200 bg-amber-50/70 dark:border-amber-800/40 dark:bg-amber-950/40">
+      <div className="flex items-center gap-2 border-b border-amber-200 px-3 py-2 text-xs font-medium text-amber-700 dark:border-amber-800/40 dark:text-amber-300">
         <Wrench size={12} />
         <span>工具调用</span>
-        <span className="ml-auto text-xs text-amber-700/60">{calls.length} 项</span>
+        <span className="ml-auto text-xs text-amber-700/60 dark:text-amber-300/60">{calls.length} 项</span>
       </div>
-      <div className="divide-y divide-amber-200/70">
+      <div className="divide-y divide-amber-200/70 dark:divide-amber-800/40">
         {calls.map((call, index) => {
           const imageUrls = extractGeneratedImages(call.result);
           return (
             <details key={`${call.name}-${index}`} className="group px-3 py-2">
-              <summary className="flex cursor-pointer list-none items-center gap-2 text-xs text-amber-900/80">
-                {call.status === "success" ? <Check size={12} className="text-emerald-600" /> : call.status === "running" ? <Loader2 size={12} className="animate-spin text-amber-600" /> : <AlertCircle size={12} className="text-red-500" />}
+              <summary className="flex cursor-pointer list-none items-center gap-2 text-xs text-amber-900/80 dark:text-amber-200/80">
+                {call.status === "success" ? <Check size={12} className="text-emerald-600 dark:text-emerald-400" /> : call.status === "running" ? <Loader2 size={12} className="animate-spin text-amber-600 dark:text-amber-400" /> : <AlertCircle size={12} className="text-red-500 dark:text-red-400" />}
                 <code className="font-mono">{call.name}</code>
                 <ChevronRight size={12} className="ml-auto transition-transform group-open:rotate-90" />
               </summary>
-              <pre className="mt-2 overflow-x-auto rounded bg-white/70 p-2 text-xs leading-relaxed text-amber-900/70">{JSON.stringify({ params: call.params, result: call.result }, null, 2)}</pre>
+              <pre className="mt-2 overflow-x-auto rounded bg-white/70 p-2 text-xs leading-relaxed text-amber-900/70 dark:bg-black/30 dark:text-amber-200/70">{JSON.stringify({ params: call.params, result: call.result }, null, 2)}</pre>
               {imageUrls.length > 0 && (
                 <div className="mt-2 grid grid-cols-2 gap-2">
                   {imageUrls.map((url, imageIndex) => (
-                    <img key={imageIndex} src={url} alt={`生成图片 ${imageIndex + 1}`} className="w-full cursor-zoom-in rounded border border-amber-200/70 bg-white/70 object-contain" onClick={() => openPreview(url)} />
+                    <img key={imageIndex} src={url} alt={`生成图片 ${imageIndex + 1}`} className="w-full cursor-zoom-in rounded border border-amber-200/70 bg-white/70 object-contain dark:border-amber-800/40 dark:bg-black/30" onClick={() => openPreview(url)} />
                   ))}
                 </div>
               )}
@@ -525,6 +545,8 @@ function Sidebar({
   onDeleteSession,
   activeTheme,
   onThemeChange,
+  themeMode,
+  onThemeModeChange,
   onClose,
 }: {
   open: boolean;
@@ -541,6 +563,8 @@ function Sidebar({
   onDeleteSession: (id: string) => void;
   activeTheme: string;
   onThemeChange: (theme: ThemePreset) => void;
+  themeMode: ThemeMode;
+  onThemeModeChange: (mode: ThemeMode) => void;
   onClose: () => void;
 }) {
   const [editValue, setEditValue] = useState("");
@@ -551,18 +575,18 @@ function Sidebar({
   return (
     <>
       {open && <button type="button" aria-label="关闭侧栏" className="fixed inset-0 z-30 bg-black/20 md:hidden" onClick={onClose} />}
-      <aside className={cn("fixed inset-y-0 left-0 z-40 flex shrink-0 flex-col overflow-hidden border-r border-black/[0.06] bg-[#f2f3f5] transition-all duration-200 md:relative md:inset-auto md:z-auto", open ? "w-[240px]" : "w-0 border-r-0") }>
+      <aside className={cn("fixed inset-y-0 left-0 z-40 flex shrink-0 flex-col overflow-hidden border-r border-black/[0.06] bg-[#f2f3f5] transition-all duration-200 md:relative md:inset-auto md:z-auto dark:bg-sidebar", open ? "w-[240px]" : "w-0 border-r-0") }>
         <div className={cn("flex h-full w-[240px] flex-col transition-opacity duration-150", open ? "opacity-100" : "opacity-0")}>
           <div className="flex items-center gap-2.5 border-b border-black/[0.06] px-4 py-[15px]">
             <Avatar className="h-7 w-7 rounded-md"><AvatarFallback className="rounded-md bg-primary text-primary-foreground"><Bot size={14} /></AvatarFallback></Avatar>
             <span className="text-sm font-semibold tracking-tight text-foreground">AetherAI</span>
-            <button type="button" aria-label="收起侧栏" className="ml-auto rounded p-1 text-foreground/40 hover:bg-black/[0.06] hover:text-foreground md:hidden" onClick={onClose}><PanelLeftClose size={14} /></button>
+            <button type="button" aria-label="收起侧栏" className="ml-auto rounded p-1 text-foreground/40 hover:bg-black/[0.06] hover:text-foreground dark:hover:bg-white/10 md:hidden" onClick={onClose}><PanelLeftClose size={14} /></button>
           </div>
           <div className="space-y-0.5 px-2 pb-1 pt-3">
             {links.map(({ icon: Icon, label, page, plus }) => (
-              <button key={page} type="button" onClick={() => onPageChange(page)} className={cn("group flex w-full items-center gap-2.5 rounded-md px-2.5 py-[7px] text-sm font-medium transition-colors", page === activePage ? "bg-black/[0.07] text-foreground" : "text-foreground/50 hover:bg-black/[0.05] hover:text-foreground/80")}>
+              <button key={page} type="button" onClick={() => onPageChange(page)} className={cn("group flex w-full items-center gap-2.5 rounded-md px-2.5 py-[7px] text-sm font-medium transition-colors", page === activePage ? "bg-black/[0.07] text-foreground dark:bg-white/10" : "text-foreground/50 hover:bg-black/[0.05] hover:text-foreground/80 dark:hover:bg-white/10 dark:hover:text-foreground")}>
                 <Icon size={13} /><span className="flex-1 text-left">{label}</span>
-                {plus && <span onClick={event => { event.stopPropagation(); onNewSession(); }} className="rounded p-0.5 opacity-40 transition-opacity hover:bg-black/[0.08] hover:opacity-100 group-hover:opacity-70"><Plus size={13} /></span>}
+                {plus && <span onClick={event => { event.stopPropagation(); onNewSession(); }} className="rounded p-0.5 opacity-40 transition-opacity hover:bg-black/[0.08] hover:opacity-100 group-hover:opacity-70 dark:hover:bg-white/10"><Plus size={13} /></span>}
               </button>
             ))}
           </div>
@@ -571,7 +595,7 @@ function Sidebar({
             {sessions.map(session => (
               <ContextMenu key={session.id}>
                 <ContextMenuTrigger asChild>
-                  <div onClick={() => onSessionChange(session.id)} className={cn("mb-0.5 flex w-full cursor-pointer select-none items-center gap-1 rounded-md px-2.5 py-2 text-left transition-colors", session.id === activeSession ? "bg-primary/10 text-primary" : "text-foreground/55 hover:bg-black/[0.05] hover:text-foreground/80")}>
+                  <div onClick={() => onSessionChange(session.id)} className={cn("mb-0.5 flex w-full cursor-pointer select-none items-center gap-1 rounded-md px-2.5 py-2 text-left transition-colors", session.id === activeSession ? "bg-primary/10 text-primary" : "text-foreground/55 hover:bg-black/[0.05] hover:text-foreground/80 dark:hover:bg-white/10 dark:hover:text-foreground")}>
                     <span className="min-w-0 flex-1 truncate text-sm leading-snug">{session.title}</span>
                     <span className="shrink-0 whitespace-nowrap text-xs text-foreground/30">{session.time}</span>
                   </div>
@@ -586,7 +610,7 @@ function Sidebar({
           </ScrollArea>
           <div className="flex items-center justify-between border-t border-black/[0.06] px-3 py-3">
             <div className="flex items-center gap-2"><Avatar className="h-7 w-7"><AvatarFallback className="bg-primary text-xs font-bold text-primary-foreground">测</AvatarFallback></Avatar><div><p className="text-sm font-medium leading-tight text-foreground">测试</p></div></div>
-            <Popover><PopoverTrigger asChild><Button variant="ghost" size="icon-sm" className="h-7 w-7 text-foreground/40 hover:bg-black/[0.06] hover:text-foreground/70"><Settings size={13} /></Button></PopoverTrigger><PopoverContent side="right" align="end" sideOffset={10} className="w-52 p-3"><p className="mb-2.5 text-xs font-semibold text-foreground">主题色</p><div className="grid grid-cols-3 gap-2">{THEMES.map(theme => <button key={theme.key} type="button" onClick={() => onThemeChange(theme)} className={cn("flex flex-col items-center gap-1.5 rounded-lg border px-2 py-2 transition-all hover:bg-muted", activeTheme === theme.key ? "border-primary bg-primary/5" : "border-border")}><span className="h-5 w-5 rounded-full" style={{ background: theme.primary, boxShadow: activeTheme === theme.key ? `0 0 0 2px white, 0 0 0 4px ${theme.primary}` : "none" }} /><span className="text-xs leading-none text-muted-foreground">{theme.label}</span></button>)}</div></PopoverContent></Popover>
+            <Popover><PopoverTrigger asChild><Button variant="ghost" size="icon-sm" className="h-7 w-7 text-foreground/40 hover:bg-black/[0.06] hover:text-foreground/70 dark:hover:bg-white/10"><Settings size={13} /></Button></PopoverTrigger><PopoverContent side="right" align="end" sideOffset={10} className="w-72 p-3"><p className="mb-2 text-xs font-semibold text-foreground">外观</p><div className="mb-3 grid grid-cols-3 gap-1 rounded-lg bg-muted p-1">{THEME_MODES.map(({ key, label, icon: Icon }) => <button key={key} type="button" onClick={() => onThemeModeChange(key)} className={cn("flex items-center justify-center gap-1 rounded-md px-1 py-1.5 text-xs transition-colors", themeMode === key ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground")}><Icon size={12} /><span>{label}</span></button>)}</div><p className="mb-2.5 text-xs font-semibold text-foreground">主题色</p><div className="grid grid-cols-3 gap-2">{THEMES.map(theme => <button key={theme.key} type="button" onClick={() => onThemeChange(theme)} className={cn("flex flex-col items-center gap-1.5 rounded-lg border px-2 py-2 transition-all hover:bg-muted", activeTheme === theme.key ? "border-primary bg-primary/5" : "border-border")}><span className="h-5 w-5 rounded-full" style={{ background: theme.primary, boxShadow: activeTheme === theme.key ? `0 0 0 2px white, 0 0 0 4px ${theme.primary}` : "none" }} /><span className="text-xs leading-none text-muted-foreground">{theme.label}</span></button>)}</div></PopoverContent></Popover>
           </div>
         </div>
       </aside>
@@ -621,7 +645,7 @@ function Sidebar({
 }
 
 function PageHeader({ title, subtitle, sidebarOpen, onToggle }: { title: string; subtitle: string; sidebarOpen: boolean; onToggle: () => void }) {
-  return <header className="flex shrink-0 items-center gap-2 border-b border-black/[0.06] bg-white px-4 py-3"><Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon-sm" className="h-7 w-7 text-foreground/40 hover:text-foreground/70" onClick={onToggle}>{sidebarOpen ? <PanelLeftClose size={15} /> : <PanelLeftOpen size={15} />}</Button></TooltipTrigger><TooltipContent>{sidebarOpen ? "收起侧栏" : "展开侧栏"}</TooltipContent></Tooltip><div><h1 className="text-sm font-semibold leading-tight text-foreground">{title}</h1><p className="mt-0.5 text-xs text-muted-foreground">{subtitle}</p></div></header>;
+  return <header className="flex shrink-0 items-center gap-2 border-b border-black/[0.06] bg-white px-4 py-3 dark:border-border dark:bg-card"><Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon-sm" className="h-7 w-7 text-foreground/40 hover:text-foreground/70" onClick={onToggle}>{sidebarOpen ? <PanelLeftClose size={15} /> : <PanelLeftOpen size={15} />}</Button></TooltipTrigger><TooltipContent>{sidebarOpen ? "收起侧栏" : "展开侧栏"}</TooltipContent></Tooltip><div><h1 className="text-sm font-semibold leading-tight text-foreground">{title}</h1><p className="mt-0.5 text-xs text-muted-foreground">{subtitle}</p></div></header>;
 }
 
 function EmptyChat({ onPrompt }: { onPrompt: (prompt: string) => void }) {
@@ -773,13 +797,13 @@ function ChatPage({
   };
 
   return <div className="flex min-h-0 flex-1 flex-col">
-    <header className="flex shrink-0 items-center justify-start border-b border-black/[0.06] bg-white px-4 py-3">
+    <header className="flex shrink-0 items-center justify-start border-b border-black/[0.06] bg-white px-4 py-3 dark:border-border dark:bg-card">
       <div className="flex items-center gap-2">
         <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon-sm" className="h-7 w-7 text-foreground/40 hover:text-foreground/70" onClick={onToggleSidebar}>{sidebarOpen ? <PanelLeftClose size={15} /> : <PanelLeftOpen size={15} />}</Button></TooltipTrigger><TooltipContent>{sidebarOpen ? "收起侧栏" : "展开侧栏"}</TooltipContent></Tooltip>
         <div><h1 className="text-sm font-semibold leading-tight text-foreground">{session?.title ?? "新对话"}</h1><p className="mt-0.5 text-xs text-muted-foreground">{messages.length} 条消息 · {modelLabel}</p></div>
       </div>
     </header>
-        <ScrollArea viewportRef={viewportRef} className="min-h-0 flex-1 bg-white">
+        <ScrollArea viewportRef={viewportRef} className="min-h-0 flex-1 bg-white dark:bg-card">
       <div className="mx-auto max-w-4xl space-y-6 px-4 py-6 sm:px-6">
         {messages.length === 0 && <EmptyChat onPrompt={prompt => onSend(prompt, [], [])} />}
         {messages.map((message, messageIndex) => message.role === "assistant" ? (
@@ -840,7 +864,7 @@ function ChatPage({
             <Avatar className="mt-0.5 h-7 w-7 shrink-0"><AvatarFallback className="bg-blue-100 text-xs font-bold text-blue-600">测</AvatarFallback></Avatar>
             <div className="flex max-w-[88%] flex-col items-end sm:max-w-[72%]">
               <div className={cn("rounded-xl px-4 py-2.5 text-sm leading-relaxed transition-opacity", message.status === "send_failed" ? "border border-destructive/30 bg-destructive/5 text-destructive" : "bg-primary text-primary-foreground", message.status === "sending" && "opacity-60")}>{message.content}</div>
-              {message.files?.length ? <div className="mt-1.5 flex max-w-full flex-wrap justify-end gap-1.5">{message.files.map(file => file.type.startsWith("image/") && file.previewUrl ? <button key={`${file.name}-${file.size}`} type="button" aria-label={`预览${file.name}`} onClick={() => openPreview(file.previewUrl!)} className="overflow-hidden rounded-lg border border-primary/30 bg-white shadow-sm transition-transform hover:scale-105"><img src={file.previewUrl} alt={file.name} className="h-12 w-12 object-cover" /></button> : <div key={`${file.name}-${file.size}`} className="flex max-w-[200px] items-center gap-1.5 rounded-lg border border-primary/30 bg-white px-2.5 py-1 text-xs font-medium text-primary"><ImageIcon size={11} className="shrink-0 text-primary/70" /><span className="truncate">{file.name}</span></div>)}</div> : null}
+              {message.files?.length ? <div className="mt-1.5 flex max-w-full flex-wrap justify-end gap-1.5">{message.files.map(file => file.type.startsWith("image/") && file.previewUrl ? <button key={`${file.name}-${file.size}`} type="button" aria-label={`预览${file.name}`} onClick={() => openPreview(file.previewUrl!)} className="overflow-hidden rounded-lg border border-primary/30 bg-white shadow-sm transition-transform hover:scale-105 dark:bg-muted"><img src={file.previewUrl} alt={file.name} className="h-12 w-12 object-cover" /></button> : <div key={`${file.name}-${file.size}`} className="flex max-w-[200px] items-center gap-1.5 rounded-lg border border-primary/30 bg-white px-2.5 py-1 text-xs font-medium text-primary dark:bg-muted"><ImageIcon size={11} className="shrink-0 text-primary/70" /><span className="truncate">{file.name}</span></div>)}</div> : null}
               {message.status === "sending" && <div className="mt-1 flex items-center gap-1"><Loader2 size={10} className="animate-spin text-muted-foreground" /><span className="text-xs text-muted-foreground">发送中…</span></div>}
               {message.status === "send_failed" && <StatusNotice status="send_failed" onRetry={() => onRetry(message.id)} />}
               {message.status === "success" && <span className="mt-1 text-xs text-muted-foreground">{message.time}</span>}
@@ -849,7 +873,7 @@ function ChatPage({
         ))}
       </div>
     </ScrollArea>
-    <div className="shrink-0 bg-white px-3 py-3 sm:px-6 sm:py-4">
+    <div className="shrink-0 bg-white px-3 py-3 sm:px-6 sm:py-4 dark:bg-card">
       <div className="mx-auto max-w-3xl">
         <div className="overflow-hidden rounded-xl border bg-card shadow-sm transition-all focus-within:border-primary/50 focus-within:ring-1 focus-within:ring-primary/30">
           {attachments.length > 0 && <div className="flex flex-wrap gap-1.5 px-4 pb-1 pt-3">{attachments.map((file, index) => <div key={`${file.name}-${index}`} className="flex max-w-[180px] items-center gap-1.5 rounded-lg border border-border bg-muted px-2.5 py-1 text-xs text-foreground/70"><Paperclip size={11} className="shrink-0 text-muted-foreground" /><span className="truncate">{file.name}</span><button type="button" aria-label={`移除${file.name}`} onClick={() => setAttachments(prev => prev.filter((_, itemIndex) => itemIndex !== index))} className="ml-0.5 shrink-0 text-muted-foreground hover:text-foreground"><X size={12} /></button></div>)}</div>}
@@ -861,7 +885,7 @@ function ChatPage({
               <Separator orientation="vertical" className="mx-1 h-4" />
               {[{ id: "search", icon: Search, label: "联网搜索" }, { id: "image", icon: ImageIcon, label: "图像生成" }].map(({ id, icon: Icon, label }) => <Tooltip key={id}><TooltipTrigger asChild><Button variant={tools.includes(id) ? "secondary" : "ghost"} size="sm" className={cn("h-7 gap-1.5 text-xs", tools.includes(id) ? "text-primary" : "text-muted-foreground hover:text-foreground")} onClick={() => onToolsChange(tools.includes(id) ? tools.filter(item => item !== id) : [...tools, id])}><Icon size={13} /><span className="hidden lg:inline">{label}</span></Button></TooltipTrigger><TooltipContent>{label}</TooltipContent></Tooltip>)}
             </div>
-            <div className="flex min-w-0 items-center gap-1">
+            <div className="flex min-w-0 items-center gap-2">
               <ModelSettingsPopover model={model} models={models} modelsLoading={modelsLoading} modelsError={modelsError} onModelChange={onModelChange} onReloadModels={onReloadModels} />
               <Button size="icon-sm" className="h-7 w-7" onClick={send} disabled={!model || (!input.trim() && !attachments.length)}><Send size={13} /></Button>
             </div>
@@ -929,7 +953,7 @@ function AssistantPage({ sidebarOpen, onToggle, onStart, assistants, onAdd, onEd
   return (
     <>
       <PageHeader title="助手" subtitle="为不同任务准备一个专属的工作方式" sidebarOpen={sidebarOpen} onToggle={onToggle} />
-      <ScrollArea className="min-h-0 flex-1 bg-white">
+<ScrollArea className="min-h-0 flex-1 bg-white dark:bg-card">
         <div className="mx-auto max-w-4xl px-4 py-6 sm:px-8">
           <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
             <div>
@@ -944,8 +968,8 @@ function AssistantPage({ sidebarOpen, onToggle, onStart, assistants, onAdd, onEd
               return (
                 <div key={id} className="group relative rounded-xl border bg-card p-4 shadow-sm transition-all hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-md">
                   <div className="absolute right-2 top-2 flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
-                    <button type="button" onClick={event => { event.stopPropagation(); openEdit(assistant); }} className="rounded p-1 text-foreground/25 hover:bg-black/[0.06] hover:text-foreground focus:outline-none" title="编辑助手"><Pencil size={14} /></button>
-                    <button type="button" onClick={event => { event.stopPropagation(); setDeleteTarget(assistant); }} className="rounded p-1 text-foreground/25 hover:bg-black/[0.06] hover:text-red-500 focus:outline-none" title="删除助手"><Trash2 size={14} /></button>
+                    <button type="button" onClick={event => { event.stopPropagation(); openEdit(assistant); }} className="rounded p-1 text-foreground/25 hover:bg-black/[0.06] hover:text-foreground focus:outline-none dark:hover:bg-white/10" title="编辑助手"><Pencil size={14} /></button>
+                    <button type="button" onClick={event => { event.stopPropagation(); setDeleteTarget(assistant); }} className="rounded p-1 text-foreground/25 hover:bg-black/[0.06] hover:text-red-500 focus:outline-none dark:hover:bg-white/10" title="删除助手"><Trash2 size={14} /></button>
                   </div>
                   <button type="button" onClick={() => onStart(id)} className="w-full text-left">
                     <div className="mb-3 flex items-center gap-2">
@@ -1025,7 +1049,24 @@ export default function App() {
   const [modelsLoading, setModelsLoading] = useState(true);
   const [modelsError, setModelsError] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [activeTheme, setActiveTheme] = useState("blue");
+  // 主题色默认蓝色；从本地存储恢复，键非法时回退到默认。
+  const [activeTheme, setActiveTheme] = useState(() => {
+    try {
+      const stored = window.localStorage.getItem(THEME_KEY);
+      return THEMES.some(theme => theme.key === stored) ? stored as string : "blue";
+    } catch {
+      return "blue";
+    }
+  });
+  // 外观模式默认跟随系统；读取独立存储键，读取失败时回退到 system。
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
+    try {
+      const stored = window.localStorage.getItem(THEME_MODE_KEY);
+      return stored === "light" || stored === "dark" || stored === "system" ? stored : "system";
+    } catch {
+      return "system";
+    }
+  });
 
   // 兜底：弹窗关闭后清除 radix modal 可能残留的背景滚动/交互锁定，避免页面无法滚动。
   useEffect(() => {
@@ -1063,6 +1104,41 @@ export default function App() {
   useEffect(() => {
     void loadModels();
   }, []);
+
+  // 依据外观模式切换深色模式：system 跟随系统偏好并监听其变化，light/dark 固定。
+  // 同时按当前主题色 + 深浅模式应用内联 CSS 变量（深色用偏暗的 dark 配色）。
+  useEffect(() => {
+    const currentTheme = THEMES.find(theme => theme.key === activeTheme) ?? THEMES[0];
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const apply = () => {
+      const dark = themeMode === "dark" || (themeMode === "system" && media.matches);
+      document.documentElement.classList.toggle("dark", dark);
+      applyTheme(currentTheme, dark);
+    };
+    apply();
+    if (themeMode === "system") {
+      media.addEventListener("change", apply);
+      return () => media.removeEventListener("change", apply);
+    }
+  }, [themeMode, activeTheme]);
+
+  // 持久化主题色，供刷新/下次启动恢复。
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(THEME_KEY, activeTheme);
+    } catch {
+      // 本地存储不可用时忽略，仅影响刷新后的主题色记忆。
+    }
+  }, [activeTheme]);
+
+  // 持久化外观模式，供刷新/下次启动恢复（index.html 首屏脚本读取同一键防闪烁）。
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(THEME_MODE_KEY, themeMode);
+    } catch {
+      // 本地存储不可用时忽略，仅影响刷新后的外观记忆。
+    }
+  }, [themeMode]);
 
   useEffect(() => {
     try {
@@ -1185,11 +1261,16 @@ export default function App() {
       const imageHint = tools.includes("image")
         ? "\n用户已开启图像生成，如需生成图片请调用 akm_generate_image 工具；生成完成后请把返回的图片 URL 以 Markdown 图片语法 ![图片](url) 写进回复正文，方便用户直接查看。"
         : "";
+      // 按 UI 工具开关显式声明工具（白名单）：开启联网搜索/图像生成时只声明对应工具；
+      // 全关时不传 tools，后端默认不会注入联网搜索/图片生成/编辑工具，
+      // 模型拿不到这些工具定义，不会自主联网或生成图片。
+      const declaredTools = resolveDeclaredTools(tools);
 
       for await (const event of runAgentStream({
         model: modelKey,
         messages: toAgentMessages(requestHistory),
         instructions: (sessions.find(session => session.id === sessionId)?.instructions ?? AGENT_INSTRUCTIONS) + searchHint + imageHint,
+        tools: declaredTools.length ? declaredTools : undefined,
         files,
       })) {
         markUserSent();
@@ -1341,12 +1422,15 @@ export default function App() {
         .filter(message => target.role !== "assistant" || message.id !== target.id)
         .map(message => message.id === userMessage.id ? userMessage : message),
     }));
-    void requestAgent(sessionId, userMessage.id, assistantMessageId, requestHistory);
+    // 重试沿用当前会话的工具开关（联网搜索/图像生成），保持白名单声明一致。
+    const sessionTools = sessions.find(session => session.id === sessionId)?.tools ?? [];
+    void requestAgent(sessionId, userMessage.id, assistantMessageId, requestHistory, [], sessionTools);
   };
   const startEdit = (id: string) => setEditingId(id);
   const saveEdit = (id: string, title: string) => { const value = title.trim(); if (value) setSessions(prev => prev.map(session => session.id === id ? { ...session, title: value } : session)); setEditingId(null); };
   const deleteSession = (id: string) => { setSessions(prev => prev.filter(session => session.id !== id)); setAllMessages(prev => { const next = { ...prev }; delete next[id]; return next; }); if (id === activeSession) { const next = sessions.find(session => session.id !== id); setActiveSession(next?.id ?? ""); } };
-  const changeTheme = (theme: ThemePreset) => { setActiveTheme(theme.key); applyTheme(theme); };
+  const changeTheme = (theme: ThemePreset) => { setActiveTheme(theme.key); applyTheme(theme, document.documentElement.classList.contains("dark")); };
+  const changeThemeMode = (mode: ThemeMode) => setThemeMode(mode);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [deleteSessionTarget, setDeleteSessionTarget] = useState<Session | null>(null);
 
@@ -1359,7 +1443,7 @@ export default function App() {
 
   return (
     <PreviewContext.Provider value={{ openPreview: setPreviewUrl }}>
-      <TooltipProvider delayDuration={400}><div className="flex h-screen w-full overflow-hidden bg-background" style={{ fontFamily: "Inter, system-ui, sans-serif" }}><Sidebar open={sidebarOpen} activePage={activePage} sessions={sessions} activeSession={activeSession} editingId={editingId} onPageChange={setActivePage} onNewSession={newSession} onSessionChange={id => { setActiveSession(id); setActivePage("chat"); const target = sessions.find(session => session.id === id); if (target?.modelKey) { const savedModel = models.find(model => model.key === target.modelKey); if (savedModel) setSelectedModel(savedModel); } }} onStartEdit={startEdit} onSaveEdit={saveEdit} onCloseEdit={() => setEditingId(null)} onDeleteSession={id => setDeleteSessionTarget(sessions.find(session => session.id === id) ?? null)} activeTheme={activeTheme} onThemeChange={changeTheme} onClose={() => setSidebarOpen(false)} /><main className="flex min-w-0 flex-1 flex-col overflow-hidden">{content}</main></div></TooltipProvider>
+      <TooltipProvider delayDuration={400}><div className="flex h-screen w-full overflow-hidden bg-background" style={{ fontFamily: "Inter, system-ui, sans-serif" }}><Sidebar open={sidebarOpen} activePage={activePage} sessions={sessions} activeSession={activeSession} editingId={editingId} onPageChange={setActivePage} onNewSession={newSession} onSessionChange={id => { setActiveSession(id); setActivePage("chat"); const target = sessions.find(session => session.id === id); if (target?.modelKey) { const savedModel = models.find(model => model.key === target.modelKey); if (savedModel) setSelectedModel(savedModel); } }} onStartEdit={startEdit} onSaveEdit={saveEdit} onCloseEdit={() => setEditingId(null)} onDeleteSession={id => setDeleteSessionTarget(sessions.find(session => session.id === id) ?? null)} activeTheme={activeTheme} onThemeChange={changeTheme} themeMode={themeMode} onThemeModeChange={changeThemeMode} onClose={() => setSidebarOpen(false)} /><main className="flex min-w-0 flex-1 flex-col overflow-hidden">{content}</main></div></TooltipProvider>
       <Dialog open={deleteSessionTarget !== null} onOpenChange={open => { if (!open) setDeleteSessionTarget(null); }}>
         <DialogContent>
           <DialogHeader>

@@ -24,6 +24,70 @@ export type AgentResponse = {
   usage?: Record<string, number>;
 };
 
+// OpenAI function calling 格式的工具定义，与后端 /v1/agent 内置工具保持一致。
+// 后端采用白名单注入：请求显式传入 tools 时只注入列表内声明的工具（未声明的内置工具
+// 如 tavily_search / akm_generate_image 等不会被注入，避免模型未经声明自主调用）。
+export type AgentTool = {
+  type: "function";
+  function: {
+    name: string;
+    description: string;
+    parameters: {
+      type: "object";
+      properties: Record<string, { type: string; description?: string; enum?: string[] }>;
+      required?: string[];
+    };
+  };
+};
+
+// 联网搜索工具（对应后端内置 tavily_search，需在服务端配置 tavily_api_key）。
+const TAVILY_SEARCH_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "tavily_search",
+    description: "通过 Tavily 实时联网搜索互联网信息，返回包含标题、链接和摘要的搜索结果。需要先在 config.json 中配置 tavily_api_key",
+    parameters: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "搜索关键词" },
+        max_results: { type: "integer", description: "返回结果数量，1 到 20，默认 5" },
+        search_depth: { type: "string", enum: ["basic", "advanced"], description: "搜索深度，默认 basic" },
+      },
+      required: ["query"],
+    },
+  },
+};
+
+// 图像生成工具（对应后端内置 akm_generate_image，需配置 image_supported_models 对应可用 Key）。
+const AKM_GENERATE_IMAGE_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_generate_image",
+    description: "调用 AKM 配置的图片生成模型生成图片，返回图片资源列表。每项含 url，并附带保存到本地的 local_path 与可访问的 http_url（/agent-uploads/...），保存失败时含 save_error。需要配置 image_supported_models 对应的可用 API Key",
+    parameters: {
+      type: "object",
+      properties: {
+        prompt: { type: "string", description: "图片描述提示词" },
+        model: { type: "string", description: "图片生成模型，默认取 image_supported_models 首项" },
+        size: { type: "string", description: "图片尺寸，如 1024x1024，可选" },
+        quality: { type: "string", description: "生成质量，如 standard 或 hd，可选" },
+        n: { type: "integer", description: "生成张数，默认 1" },
+      },
+      required: ["prompt"],
+    },
+  },
+};
+
+// 按客户端 UI 工具开关（"search" / "image"）映射为显式声明的工具定义列表。
+// 开启哪个声明哪个；全关时返回空数组（调用方据此不携带 tools 字段，
+// 后端默认不注入联网搜索/图片生成/编辑工具）。
+export function resolveDeclaredTools(tools: string[]): AgentTool[] {
+  const declared: AgentTool[] = [];
+  if (tools.includes("search")) declared.push(TAVILY_SEARCH_TOOL);
+  if (tools.includes("image")) declared.push(AKM_GENERATE_IMAGE_TOOL);
+  return declared;
+}
+
 export type AgentStreamEventName = "reasoning_delta" | "model_delta" | "turn_start" | "tool_call" | "tool_result" | "final" | "error";
 
 export type AgentStreamEvent = {
@@ -81,11 +145,15 @@ function createAgentRequestBody(options: {
   model: string;
   messages: AgentMessage[];
   instructions: string;
+  tools?: AgentTool[];
 }, stream: boolean) {
   return JSON.stringify({
     model: options.model,
     messages: options.messages,
     instructions: options.instructions,
+    // 仅当显式声明了工具时才携带 tools 字段（白名单注入）。
+    // 未开启任何工具时不传 tools：后端默认不注入联网搜索/图片生成/编辑工具。
+    ...(options.tools?.length ? { tools: options.tools } : {}),
     api_path: "chat/completions",
     max_turns: 20,
     stream,
@@ -98,12 +166,16 @@ function createAgentFormData(options: {
   model: string;
   messages: AgentMessage[];
   instructions: string;
+  tools?: AgentTool[];
   files: File[];
 }, stream: boolean) {
   const form = new FormData();
   form.append("model", options.model);
   form.append("messages", JSON.stringify(options.messages));
   form.append("instructions", options.instructions);
+  // multipart 场景同样支持 tools：仅当显式声明了工具时才携带，
+  // 与纯 JSON 一样按白名单注入声明中列出的工具。
+  if (options.tools?.length) form.append("tools", JSON.stringify(options.tools));
   form.append("api_path", "chat/completions");
   form.append("max_turns", "20");
   form.append("stream", String(stream));
@@ -121,6 +193,7 @@ export async function runAgent(options: {
   model: string;
   messages: AgentMessage[];
   instructions: string;
+  tools?: AgentTool[];
 }): Promise<AgentResponse> {
   const payload = await requestJson<AgentResponse>("/v1/agent", {
     method: "POST",
@@ -162,6 +235,7 @@ export async function* runAgentStream(options: {
   model: string;
   messages: AgentMessage[];
   instructions: string;
+  tools?: AgentTool[];
   files?: File[];
 }): AsyncGenerator<AgentStreamEvent> {
   // 携带附件时改用 multipart/form-data，否则保持纯 JSON。
