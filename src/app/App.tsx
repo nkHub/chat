@@ -180,7 +180,14 @@ function readStoredChatState(): StoredChatState | null {
     const raw = window.localStorage.getItem(CHAT_STORAGE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as StoredChatState;
-    return parsed && typeof parsed === "object" ? parsed : null;
+    if (parsed && typeof parsed === "object") {
+      // 迁移旧数据：早期会话时间硬编码为"刚刚"的固定字符串，刷新后永远不变，这里补上当前时刻。
+      if (Array.isArray(parsed.sessions)) {
+        parsed.sessions = parsed.sessions.map(session => (session.time === "刚刚" ? { ...session, time: formatTime() } : session));
+      }
+      return parsed;
+    }
+    return null;
   } catch {
     return null;
   }
@@ -1158,7 +1165,7 @@ export default function App() {
 
   const newSession = () => {
     const id = `new-${Date.now()}`;
-    setSessions(prev => [{ id, title: "新对话", time: "刚刚" }, ...prev]);
+    setSessions(prev => [{ id, title: "新对话", time: formatTime() }, ...prev]);
     setAllMessages(prev => ({ ...prev, [id]: [] }));
     setActiveSession(id);
     setActivePage("chat");
@@ -1392,7 +1399,7 @@ export default function App() {
     setAllMessages(prev => ({ ...prev, [sessionId]: [...(prev[sessionId] ?? []), message] }));
     setSessions(prev => {
       if (!prev.some(session => session.id === sessionId)) {
-        return [{ id: sessionId, title: content.slice(0, 22), time: "刚刚" }, ...prev];
+        return [{ id: sessionId, title: content.slice(0, 22), time: formatTime() }, ...prev];
       }
       return prev.map(session => session.id === sessionId && session.title === "新对话" ? { ...session, title: content.slice(0, 22) } : session);
     });
@@ -1434,16 +1441,22 @@ export default function App() {
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [deleteSessionTarget, setDeleteSessionTarget] = useState<Session | null>(null);
 
+  // 侧边栏会话时间显示为"最后聊天时间"：取该会话最后一条消息的时间，无消息的空会话用创建时间。
+  const displaySessions = sessions.map(session => {
+    const list = allMessages[session.id];
+    return list && list.length > 0 ? { ...session, time: list[list.length - 1].time } : session;
+  });
+
   const content = useMemo(() => {
     if (activePage === "automation") return <AutomationPage sidebarOpen={sidebarOpen} onToggle={() => setSidebarOpen(value => !value)} />;
     if (activePage === "workflow") return <WorkflowPage sidebarOpen={sidebarOpen} onToggle={() => setSidebarOpen(value => !value)} />;
-    if (activePage === "assistant") return <AssistantPage sidebarOpen={sidebarOpen} onToggle={() => setSidebarOpen(value => !value)} assistants={assistants} onAdd={(name, prompt) => setAssistants(prev => [{ id: `custom-${Date.now()}`, name, description: "自定义助手 · 使用你设定的提示词工作。", prompt, icon: Bot, color: "bg-primary/10 text-primary" }, ...prev])} onEdit={(id, name, prompt) => setAssistants(prev => prev.map(assistant => assistant.id === id ? { ...assistant, name, ...(prompt ? { prompt } : {}) } : assistant))} onStart={assistantId => { const assistant = assistants.find(candidate => candidate.id === assistantId); const assistantName = assistant?.name ?? "助手"; const message: Message = { id: `${assistantId}-message`, role: "user", content: `你好，请以「${assistantName}」的身份来帮我。`, time: formatTime(), status: "success" }; setSessions(prev => [{ id: assistantId, title: assistantName, time: "刚刚", ...(assistant?.prompt ? { instructions: assistant.prompt } : {}) }, ...prev]); setAllMessages(prev => ({ ...prev, [assistantId]: [message] })); setActiveSession(assistantId); setActivePage("chat"); }} onDelete={assistantId => setAssistants(prev => prev.filter(assistant => assistant.id !== assistantId))} />;
+    if (activePage === "assistant") return <AssistantPage sidebarOpen={sidebarOpen} onToggle={() => setSidebarOpen(value => !value)} assistants={assistants} onAdd={(name, prompt) => setAssistants(prev => [{ id: `custom-${Date.now()}`, name, description: "自定义助手 · 使用你设定的提示词工作。", prompt, icon: Bot, color: "bg-primary/10 text-primary" }, ...prev])} onEdit={(id, name, prompt) => setAssistants(prev => prev.map(assistant => assistant.id === id ? { ...assistant, name, ...(prompt ? { prompt } : {}) } : assistant))} onStart={assistantId => { const assistant = assistants.find(candidate => candidate.id === assistantId); const assistantName = assistant?.name ?? "助手"; const message: Message = { id: `${assistantId}-message`, role: "user", content: `你好，请以「${assistantName}」的身份来帮我。`, time: formatTime(), status: "success" }; setSessions(prev => [{ id: assistantId, title: assistantName, time: formatTime(), ...(assistant?.prompt ? { instructions: assistant.prompt } : {}) }, ...prev]); setAllMessages(prev => ({ ...prev, [assistantId]: [message] })); setActiveSession(assistantId); setActivePage("chat"); }} onDelete={assistantId => setAssistants(prev => prev.filter(assistant => assistant.id !== assistantId))} />;
     return <ChatPage session={activeSessionData} messages={messages} model={selectedModel} models={models} modelsLoading={modelsLoading} modelsError={modelsError} sidebarOpen={sidebarOpen} onToggleSidebar={() => setSidebarOpen(value => !value)} onModelChange={model => { setSelectedModel(model); if (activeSession) setSessions(prev => prev.map(session => session.id === activeSession ? { ...session, modelKey: model.key } : session)); }} onReloadModels={() => { void loadModels(); }}     onSend={(contentValue, attachments, tools) => sendMessage(contentValue, attachments, tools)} onRetry={retryMessage} tools={activeSessionData?.tools ?? []} onToolsChange={tools => { if (!activeSession) return; setSessions(prev => prev.map(session => session.id === activeSession ? { ...session, tools } : session)); }} />;
   }, [activePage, activeSessionData, allMessages, messages, models, modelsLoading, modelsError, selectedModel, sidebarOpen]);
 
   return (
     <PreviewContext.Provider value={{ openPreview: setPreviewUrl }}>
-      <TooltipProvider delayDuration={400}><div className="flex h-screen w-full overflow-hidden bg-background" style={{ fontFamily: "Inter, system-ui, sans-serif" }}><Sidebar open={sidebarOpen} activePage={activePage} sessions={sessions} activeSession={activeSession} editingId={editingId} onPageChange={setActivePage} onNewSession={newSession} onSessionChange={id => { setActiveSession(id); setActivePage("chat"); const target = sessions.find(session => session.id === id); if (target?.modelKey) { const savedModel = models.find(model => model.key === target.modelKey); if (savedModel) setSelectedModel(savedModel); } }} onStartEdit={startEdit} onSaveEdit={saveEdit} onCloseEdit={() => setEditingId(null)} onDeleteSession={id => setDeleteSessionTarget(sessions.find(session => session.id === id) ?? null)} activeTheme={activeTheme} onThemeChange={changeTheme} themeMode={themeMode} onThemeModeChange={changeThemeMode} onClose={() => setSidebarOpen(false)} /><main className="flex min-w-0 flex-1 flex-col overflow-hidden">{content}</main></div></TooltipProvider>
+      <TooltipProvider delayDuration={400}><div className="flex h-screen w-full overflow-hidden bg-background" style={{ fontFamily: "Inter, system-ui, sans-serif" }}><Sidebar open={sidebarOpen} activePage={activePage} sessions={displaySessions} activeSession={activeSession} editingId={editingId} onPageChange={setActivePage} onNewSession={newSession} onSessionChange={id => { setActiveSession(id); setActivePage("chat"); const target = sessions.find(session => session.id === id); if (target?.modelKey) { const savedModel = models.find(model => model.key === target.modelKey); if (savedModel) setSelectedModel(savedModel); } }} onStartEdit={startEdit} onSaveEdit={saveEdit} onCloseEdit={() => setEditingId(null)} onDeleteSession={id => setDeleteSessionTarget(sessions.find(session => session.id === id) ?? null)} activeTheme={activeTheme} onThemeChange={changeTheme} themeMode={themeMode} onThemeModeChange={changeThemeMode} onClose={() => setSidebarOpen(false)} /><main className="flex min-w-0 flex-1 flex-col overflow-hidden">{content}</main></div></TooltipProvider>
       <Dialog open={deleteSessionTarget !== null} onOpenChange={open => { if (!open) setDeleteSessionTarget(null); }}>
         <DialogContent>
           <DialogHeader>
