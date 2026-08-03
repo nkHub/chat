@@ -33,20 +33,17 @@ import {
   ThumbsDown,
   ThumbsUp,
   Trash2,
+  FileText,
   Wrench,
   X,
   Zap,
 } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  ContextMenu,
-  ContextMenuContent,
-  ContextMenuItem,
-  ContextMenuSeparator,
-  ContextMenuTrigger,
-} from "@/components/ui/context-menu";
+import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from "@/components/ui/context-menu";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
@@ -89,6 +86,10 @@ type MessageSegment =
   | { type: "thinking"; content: string }
   | { type: "tool"; name: string; params: Record<string, unknown>; result: unknown; status: "running" | "success" | "error" };
 
+// 消息携带附件的元数据（仅存名称/类型/大小，不保存文件内容，随会话持久化）。
+// previewUrl 为图片的临时 Blob URL，仅在当前页面会话内有效，持久化时会被剔除。
+type AttachmentMeta = { name: string; type: string; size: number; previewUrl?: string };
+
 type Message = {
   id: string;
   role: "user" | "assistant";
@@ -101,9 +102,10 @@ type Message = {
   citations?: Citation[];
   functionCalls?: FunctionCall[];
   segments?: MessageSegment[];
+  files?: AttachmentMeta[];
 };
 
-type Session = { id: string; title: string; time: string; tools?: string[]; modelKey?: string };
+type Session = { id: string; title: string; time: string; tools?: string[]; modelKey?: string; instructions?: string };
 
 type ChatModel = {
   key: string;
@@ -117,6 +119,7 @@ type StoredChatState = {
   allMessages?: Record<string, Message[]>;
   activeSession?: string;
   selectedModelKey?: string;
+  assistants?: Omit<AssistantDef, "icon" | "color">[];
 };
 
 const CHAT_STORAGE_KEY = "aether-ai-chat-state";
@@ -138,7 +141,16 @@ const QUICK_PROMPTS = [
   { icon: Wrench, label: "方案设计", prompt: "帮我设计一个可落地的技术方案，包含架构图和步骤。" },
 ];
 
-const ASSISTANTS = [
+type AssistantDef = {
+  id: string;
+  name: string;
+  description: string;
+  prompt?: string;
+  icon: LucideIcon;
+  color: string;
+};
+
+const DEFAULT_ASSISTANTS: AssistantDef[] = [
   { id: "researcher", name: "研究助手", description: "梳理资料、提炼重点，快速形成研究结论。", icon: Search, color: "bg-blue-100 text-blue-600" },
   { id: "writer", name: "写作助手", description: "把零散想法整理成清晰、有说服力的文字。", icon: Pencil, color: "bg-violet-100 text-violet-600" },
   { id: "coder", name: "编码助手", description: "分析代码、定位问题，给出可落地的实现建议。", icon: Cpu, color: "bg-emerald-100 text-emerald-600" },
@@ -294,12 +306,12 @@ function CodeBlock({ code, language }: { code: string; language: string }) {
   );
 }
 
-function renderMarkdown(text: string) {
+function renderMarkdown(text: string, components: Components = MARKDOWN_COMPONENTS) {
   return (
     <ReactMarkdown
       remarkPlugins={[remarkGfm, remarkMath]}
       rehypePlugins={[rehypeKatex]}
-      components={MARKDOWN_COMPONENTS}
+      components={components}
     >
       {text}
     </ReactMarkdown>
@@ -307,9 +319,55 @@ function renderMarkdown(text: string) {
 }
 
 // 记忆化 Markdown 渲染：仅当内容变化时才重新解析，避免消息列表全量重渲染时重复解析未变化的消息。
-const MemoMarkdown = memo(function MemoMarkdown({ content }: { content: string }) {
-  return <div>{renderMarkdown(content)}</div>;
+const MemoMarkdown = memo(function MemoMarkdown({ content, components }: { content: string; components?: Components }) {
+  return <div>{renderMarkdown(content, components)}</div>;
 });
+
+// 思考过程的 Markdown 组件映射：与正文（MARKDOWN_COMPONENTS）区分，整体走淡紫色调。
+const THINKING_COMPONENTS: Components = {
+  h1: ({ node: _node, ...props }) => <h1 className="mb-1 mt-2 text-sm font-semibold text-violet-900" {...props} />,
+  h2: ({ node: _node, ...props }) => <h2 className="mb-1 mt-2 text-sm font-semibold text-violet-900" {...props} />,
+  h3: ({ node: _node, ...props }) => <h3 className="mb-1 mt-2 text-sm font-semibold text-violet-900" {...props} />,
+  h4: ({ node: _node, ...props }) => <h4 className="mb-1 mt-2 text-sm font-semibold text-violet-900" {...props} />,
+  h5: ({ node: _node, ...props }) => <h5 className="mb-1 mt-2 text-sm font-semibold text-violet-900" {...props} />,
+  h6: ({ node: _node, ...props }) => <h6 className="mb-1 mt-2 text-sm font-semibold text-violet-900" {...props} />,
+  p: ({ node: _node, ...props }) => <p className="mb-1 text-sm leading-relaxed text-violet-700/80" {...props} />,
+  a: ({ node: _node, ...props }) => <a target="_blank" rel="noreferrer noopener" className="text-violet-600 underline underline-offset-2 hover:opacity-80" {...props} />,
+  strong: ({ node: _node, ...props }) => <strong className="font-semibold text-violet-900" {...props} />,
+  em: ({ node: _node, ...props }) => <em className="italic text-violet-700/80" {...props} />,
+  del: ({ node: _node, ...props }) => <del className="text-violet-500" {...props} />,
+  ul: ({ node: _node, ...props }) => <ul className="my-2 list-disc space-y-1.5 pl-5" {...props} />,
+  ol: ({ node: _node, ...props }) => <ol className="my-2 list-decimal space-y-1.5 pl-5" {...props} />,
+  li: ({ node: _node, ...props }) => <li className="text-sm leading-relaxed text-violet-700/80" {...props} />,
+  blockquote: ({ node: _node, ...props }) => <blockquote className="my-2 border-l-2 border-violet-400/50 pl-3 italic text-violet-600" {...props} />,
+  hr: ({ node: _node, ...props }) => <hr className="my-3 border-violet-200" {...props} />,
+  img: ({ node: _node, alt, ...props }) => {
+    const { openPreview } = useContext(PreviewContext);
+    return (
+      <img
+        alt={alt ?? ""}
+        className="my-2 max-w-full cursor-zoom-in rounded-lg"
+        {...props}
+        onClick={() => { if (props.src) openPreview(props.src); }}
+      />
+    );
+  },
+  code: ({ node: _node, ...props }) => <code className="rounded bg-violet-100 px-1.5 py-0.5 font-mono text-xs text-violet-800" {...props} />,
+  pre: ({ node: _node, children }) => (
+    <pre className="my-2 overflow-x-auto rounded-lg border border-violet-200 bg-violet-100/60 p-2.5 font-mono text-xs leading-relaxed text-violet-800">
+      <code>{nodeToText(children)}</code>
+    </pre>
+  ),
+  table: ({ node: _node, children, ...props }) => (
+    <div className="my-2 overflow-x-auto">
+      <table className="w-full border-collapse text-sm text-violet-700/80" {...props}>{children}</table>
+    </div>
+  ),
+  thead: ({ node: _node, ...props }) => <thead className="bg-violet-100/60" {...props} />,
+  th: ({ node: _node, ...props }) => <th className="border border-violet-200 px-3 py-2 text-left text-xs font-semibold text-violet-900" {...props} />,
+  td: ({ node: _node, ...props }) => <td className="border border-violet-200 px-3 py-2 align-top text-sm text-violet-700/80" {...props} />,
+  input: ({ node: _node, ...props }) => <input className="mr-1.5 accent-violet-600" disabled {...props} />,
+};
 
 // 思考过程折叠块：默认展开状态由 defaultOpen 决定（最新消息默认展开），
 // 展开/收起状态由组件内部记忆，重新渲染不会重置。
@@ -322,8 +380,8 @@ function ThinkingBlock({ text, defaultOpen = false }: { text: string; defaultOpe
         <span className="font-medium">思考过程</span>
         <span className="ml-auto text-xs text-muted-foreground">{open ? "收起" : "展开"}</span>
       </summary>
-      <div onClick={() => setOpen(false)} className="border-t border-violet-200 px-3 pb-3 pt-2 text-xs leading-relaxed text-violet-700/70">
-        {text}
+      <div onClick={() => setOpen(false)} className="border-t border-violet-200 px-3 pb-3 pt-2 leading-relaxed">
+        <MemoMarkdown components={THINKING_COMPONENTS} content={text} />
       </div>
     </details>
   );
@@ -463,6 +521,7 @@ function Sidebar({
   onSessionChange,
   onStartEdit,
   onSaveEdit,
+  onCloseEdit,
   onDeleteSession,
   activeTheme,
   onThemeChange,
@@ -478,6 +537,7 @@ function Sidebar({
   onSessionChange: (id: string) => void;
   onStartEdit: (id: string) => void;
   onSaveEdit: (id: string, title: string) => void;
+  onCloseEdit: () => void;
   onDeleteSession: (id: string) => void;
   activeTheme: string;
   onThemeChange: (theme: ThemePreset) => void;
@@ -487,8 +547,6 @@ function Sidebar({
   const links = [
     { icon: MessageSquare, label: "对话", page: "chat", plus: true },
     { icon: Cpu, label: "助手", page: "assistant", plus: false },
-    { icon: Zap, label: "工作流", page: "workflow", plus: false },
-    { icon: Clock, label: "自动化", page: "automation", plus: false },
   ];
   return (
     <>
@@ -502,22 +560,20 @@ function Sidebar({
           </div>
           <div className="space-y-0.5 px-2 pb-1 pt-3">
             {links.map(({ icon: Icon, label, page, plus }) => (
-              <button key={page} type="button" onClick={() => onPageChange(page)} className={cn("group flex w-full items-center gap-2.5 rounded-md px-2.5 py-[7px] text-xs font-medium transition-colors", page === activePage ? "bg-black/[0.07] text-foreground" : "text-foreground/50 hover:bg-black/[0.05] hover:text-foreground/80")}>
+              <button key={page} type="button" onClick={() => onPageChange(page)} className={cn("group flex w-full items-center gap-2.5 rounded-md px-2.5 py-[7px] text-sm font-medium transition-colors", page === activePage ? "bg-black/[0.07] text-foreground" : "text-foreground/50 hover:bg-black/[0.05] hover:text-foreground/80")}>
                 <Icon size={13} /><span className="flex-1 text-left">{label}</span>
                 {plus && <span onClick={event => { event.stopPropagation(); onNewSession(); }} className="rounded p-0.5 opacity-40 transition-opacity hover:bg-black/[0.08] hover:opacity-100 group-hover:opacity-70"><Plus size={13} /></span>}
               </button>
             ))}
           </div>
           <ScrollArea className="min-h-0 flex-1 px-2">
-            <p className="px-2.5 py-1.5 text-xs font-semibold uppercase tracking-widest text-foreground/30">最近对话</p>
+            <p className="px-2.5 py-1.5 text-sm font-semibold uppercase tracking-widest text-foreground/30">最近对话</p>
             {sessions.map(session => (
               <ContextMenu key={session.id}>
                 <ContextMenuTrigger asChild>
-                  <div onClick={() => editingId !== session.id && onSessionChange(session.id)} className={cn("mb-0.5 flex w-full cursor-pointer select-none items-start justify-between rounded-md px-2.5 py-2 text-left transition-colors", session.id === activeSession ? "bg-primary/10 text-primary" : "text-foreground/55 hover:bg-black/[0.05] hover:text-foreground/80")}>
-                    {editingId === session.id ? (
-                      <input autoFocus value={editValue} onChange={event => setEditValue(event.target.value)} onBlur={() => onSaveEdit(session.id, editValue)} onKeyDown={event => { if (event.key === "Enter") onSaveEdit(session.id, editValue); if (event.key === "Escape") onSaveEdit(session.id, session.title); }} onClick={event => event.stopPropagation()} className="min-w-0 flex-1 rounded bg-black/[0.06] px-1.5 py-0.5 text-xs text-foreground outline-none focus:ring-1 focus:ring-primary/40" />
-                    ) : <span className="line-clamp-2 min-w-0 flex-1 pr-2 text-xs leading-snug">{session.title}</span>}
-                    <span className="mt-0.5 shrink-0 text-xs text-foreground/30">{session.time}</span>
+                  <div onClick={() => onSessionChange(session.id)} className={cn("mb-0.5 flex w-full cursor-pointer select-none items-center gap-1 rounded-md px-2.5 py-2 text-left transition-colors", session.id === activeSession ? "bg-primary/10 text-primary" : "text-foreground/55 hover:bg-black/[0.05] hover:text-foreground/80")}>
+                    <span className="min-w-0 flex-1 truncate text-sm leading-snug">{session.title}</span>
+                    <span className="shrink-0 whitespace-nowrap text-xs text-foreground/30">{session.time}</span>
                   </div>
                 </ContextMenuTrigger>
                 <ContextMenuContent className="w-44">
@@ -529,11 +585,37 @@ function Sidebar({
             ))}
           </ScrollArea>
           <div className="flex items-center justify-between border-t border-black/[0.06] px-3 py-3">
-            <div className="flex items-center gap-2"><Avatar className="h-7 w-7"><AvatarFallback className="bg-primary text-xs font-bold text-primary-foreground">测</AvatarFallback></Avatar><div><p className="text-xs font-medium leading-tight text-foreground">测试</p></div></div>
+            <div className="flex items-center gap-2"><Avatar className="h-7 w-7"><AvatarFallback className="bg-primary text-xs font-bold text-primary-foreground">测</AvatarFallback></Avatar><div><p className="text-sm font-medium leading-tight text-foreground">测试</p></div></div>
             <Popover><PopoverTrigger asChild><Button variant="ghost" size="icon-sm" className="h-7 w-7 text-foreground/40 hover:bg-black/[0.06] hover:text-foreground/70"><Settings size={13} /></Button></PopoverTrigger><PopoverContent side="right" align="end" sideOffset={10} className="w-52 p-3"><p className="mb-2.5 text-xs font-semibold text-foreground">主题色</p><div className="grid grid-cols-3 gap-2">{THEMES.map(theme => <button key={theme.key} type="button" onClick={() => onThemeChange(theme)} className={cn("flex flex-col items-center gap-1.5 rounded-lg border px-2 py-2 transition-all hover:bg-muted", activeTheme === theme.key ? "border-primary bg-primary/5" : "border-border")}><span className="h-5 w-5 rounded-full" style={{ background: theme.primary, boxShadow: activeTheme === theme.key ? `0 0 0 2px white, 0 0 0 4px ${theme.primary}` : "none" }} /><span className="text-xs leading-none text-muted-foreground">{theme.label}</span></button>)}</div></PopoverContent></Popover>
           </div>
         </div>
       </aside>
+      <Dialog
+        open={editingId !== null}
+        onOpenChange={open => {
+          if (!open) onCloseEdit();
+        }}
+      >
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>编辑会话标题</DialogTitle>
+            <DialogDescription>修改后点击保存，或按 Esc / 点取消放弃。</DialogDescription>
+          </DialogHeader>
+          <input
+            autoFocus
+            value={editValue}
+            onChange={event => setEditValue(event.target.value)}
+            onKeyDown={event => {
+              if (event.key === "Enter" && editingId) onSaveEdit(editingId, editValue);
+            }}
+            className="mt-2 w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground outline-none focus:ring-2 focus:ring-primary/40"
+          />
+          <DialogFooter>
+            <Button variant="ghost" onClick={onCloseEdit}>取消</Button>
+            <Button onClick={() => editingId && onSaveEdit(editingId, editValue)}>保存</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }
@@ -617,6 +699,7 @@ function ChatPage({
 }) {
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<File[]>([]);
+  const { openPreview } = useContext(PreviewContext);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -757,6 +840,7 @@ function ChatPage({
             <Avatar className="mt-0.5 h-7 w-7 shrink-0"><AvatarFallback className="bg-blue-100 text-xs font-bold text-blue-600">测</AvatarFallback></Avatar>
             <div className="flex max-w-[88%] flex-col items-end sm:max-w-[72%]">
               <div className={cn("rounded-xl px-4 py-2.5 text-sm leading-relaxed transition-opacity", message.status === "send_failed" ? "border border-destructive/30 bg-destructive/5 text-destructive" : "bg-primary text-primary-foreground", message.status === "sending" && "opacity-60")}>{message.content}</div>
+              {message.files?.length ? <div className="mt-1.5 flex max-w-full flex-wrap justify-end gap-1.5">{message.files.map(file => file.type.startsWith("image/") && file.previewUrl ? <button key={`${file.name}-${file.size}`} type="button" aria-label={`预览${file.name}`} onClick={() => openPreview(file.previewUrl!)} className="overflow-hidden rounded-lg border border-primary/30 bg-white shadow-sm transition-transform hover:scale-105"><img src={file.previewUrl} alt={file.name} className="h-12 w-12 object-cover" /></button> : <div key={`${file.name}-${file.size}`} className="flex max-w-[200px] items-center gap-1.5 rounded-lg border border-primary/30 bg-white px-2.5 py-1 text-xs font-medium text-primary"><ImageIcon size={11} className="shrink-0 text-primary/70" /><span className="truncate">{file.name}</span></div>)}</div> : null}
               {message.status === "sending" && <div className="mt-1 flex items-center gap-1"><Loader2 size={10} className="animate-spin text-muted-foreground" /><span className="text-xs text-muted-foreground">发送中…</span></div>}
               {message.status === "send_failed" && <StatusNotice status="send_failed" onRetry={() => onRetry(message.id)} />}
               {message.status === "success" && <span className="mt-1 text-xs text-muted-foreground">{message.time}</span>}
@@ -797,12 +881,134 @@ function WorkflowPage({ sidebarOpen, onToggle }: { sidebarOpen: boolean; onToggl
   return <><PageHeader title="工作流" subtitle="把多个步骤连接成可重复使用的流程" sidebarOpen={sidebarOpen} onToggle={onToggle} /><ScrollArea className="min-h-0 flex-1 bg-white"><div className="mx-auto max-w-4xl space-y-6 px-4 py-6 sm:px-8"><div className="flex flex-wrap items-end justify-between gap-4"><div><h2 className="text-xl font-semibold">我的工作流</h2><p className="mt-1 text-sm text-muted-foreground">从一个清晰的流程开始自动化你的工作。</p></div><Button className="gap-2"><Plus size={15} />新建工作流</Button></div><div className="rounded-xl border bg-card p-5 shadow-sm"><div className="flex items-start justify-between"><div><div className="flex items-center gap-2"><h3 className="text-sm font-semibold">内容摘要流程</h3><Badge variant="green" className="h-4 px-1.5 py-0 text-xs">已启用</Badge></div><p className="mt-1 text-xs text-muted-foreground">将长文本整理成适合分享的要点摘要。</p></div><Button variant="ghost" size="icon-sm" className="h-7 w-7 text-muted-foreground"><Settings size={14} /></Button></div><div className="mt-6 grid gap-2 md:grid-cols-[1fr_auto_1fr_auto_1fr] md:items-center">{steps.map((step, index) => <><div key={step.title} className="rounded-lg border bg-background px-3 py-3"><div className="mb-2 flex h-7 w-7 items-center justify-center rounded-md bg-primary/10 text-primary"><step.icon size={14} /></div><p className="text-xs font-semibold">{step.title}</p><p className="mt-1 text-xs leading-relaxed text-muted-foreground">{step.text}</p></div>{index < steps.length - 1 && <ArrowRight key={`arrow-${step.title}`} size={15} className="mx-auto rotate-90 text-muted-foreground md:rotate-0" />}</>)}</div></div></div></ScrollArea></>;
 }
 
-function AssistantPage({ sidebarOpen, onToggle, onStart }: { sidebarOpen: boolean; onToggle: () => void; onStart: (id: string) => void }) {
-  return <><PageHeader title="助手" subtitle="为不同任务准备一个专属的工作方式" sidebarOpen={sidebarOpen} onToggle={onToggle} /><ScrollArea className="min-h-0 flex-1 bg-white"><div className="mx-auto max-w-4xl px-4 py-6 sm:px-8"><div className="mb-6"><h2 className="text-xl font-semibold">选择一个助手</h2><p className="mt-1 text-sm text-muted-foreground">每个助手都有自己的重点和语气，你可以随时开始新的对话。</p></div><div className="grid gap-3 md:grid-cols-3">{ASSISTANTS.map(({ id, name, description, icon: Icon, color }) => <button key={id} type="button" onClick={() => onStart(id)} className="group rounded-xl border bg-card p-4 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-md"><div className={cn("mb-5 flex h-9 w-9 items-center justify-center rounded-lg", color)}><Icon size={17} /></div><h3 className="text-sm font-semibold">{name}</h3><p className="mt-1.5 min-h-10 text-xs leading-relaxed text-muted-foreground">{description}</p><div className="mt-5 flex items-center gap-1 text-xs font-medium text-primary opacity-70 transition-opacity group-hover:opacity-100">开始使用<ArrowRight size={12} /></div></button>)}</div></div></ScrollArea></>;
+function AssistantPage({ sidebarOpen, onToggle, onStart, assistants, onAdd, onEdit, onDelete }: {
+  sidebarOpen: boolean;
+  onToggle: () => void;
+  onStart: (id: string) => void;
+  assistants: AssistantDef[];
+  onAdd: (name: string, prompt: string) => void;
+  onEdit: (id: string, name: string, prompt: string) => void;
+  onDelete: (id: string) => void;
+}) {
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<AssistantDef | null>(null);
+  const [editTarget, setEditTarget] = useState<AssistantDef | null>(null);
+  const [name, setName] = useState("");
+  const [prompt, setPrompt] = useState("");
+
+  // 关闭对话框并清空表单，避免残留上次的编辑/添加状态。
+  const closeDialog = () => {
+    setDialogOpen(false);
+    setEditTarget(null);
+    setName("");
+    setPrompt("");
+  };
+
+  // 打开编辑对话框：预填当前助手的名称与提示词。
+  const openEdit = (assistant: AssistantDef) => {
+    setEditTarget(assistant);
+    setName(assistant.name);
+    setPrompt(assistant.prompt ?? "");
+    setDialogOpen(true);
+  };
+
+  const submit = () => {
+    const trimmedName = name.trim();
+    if (!trimmedName) return;
+    if (editTarget) {
+      // 编辑模式：名称必填，提示词可为空（为空时保留原提示词）。
+      onEdit(editTarget.id, trimmedName, prompt.trim());
+    } else {
+      const trimmedPrompt = prompt.trim();
+      if (!trimmedPrompt) return;
+      onAdd(trimmedName, trimmedPrompt);
+    }
+    closeDialog();
+  };
+
+  return (
+    <>
+      <PageHeader title="助手" subtitle="为不同任务准备一个专属的工作方式" sidebarOpen={sidebarOpen} onToggle={onToggle} />
+      <ScrollArea className="min-h-0 flex-1 bg-white">
+        <div className="mx-auto max-w-4xl px-4 py-6 sm:px-8">
+          <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
+            <div>
+              <h2 className="text-xl font-semibold">选择一个助手</h2>
+              <p className="mt-1 text-sm text-muted-foreground">每个助手都有自己的重点和语气，你可以随时开始新的对话。</p>
+            </div>
+            <Button className="gap-2" onClick={() => { setEditTarget(null); setName(""); setPrompt(""); setDialogOpen(true); }}><Plus size={15} />添加助手</Button>
+          </div>
+          <div className="grid gap-3 md:grid-cols-3">
+            {assistants.map(assistant => {
+              const { id, name: assistantName, description, icon: Icon, color } = assistant;
+              return (
+                <div key={id} className="group relative rounded-xl border bg-card p-4 shadow-sm transition-all hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-md">
+                  <div className="absolute right-2 top-2 flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+                    <button type="button" onClick={event => { event.stopPropagation(); openEdit(assistant); }} className="rounded p-1 text-foreground/25 hover:bg-black/[0.06] hover:text-foreground focus:outline-none" title="编辑助手"><Pencil size={14} /></button>
+                    <button type="button" onClick={event => { event.stopPropagation(); setDeleteTarget(assistant); }} className="rounded p-1 text-foreground/25 hover:bg-black/[0.06] hover:text-red-500 focus:outline-none" title="删除助手"><Trash2 size={14} /></button>
+                  </div>
+                  <button type="button" onClick={() => onStart(id)} className="w-full text-left">
+                    <div className="mb-3 flex items-center gap-2">
+                      <div className={cn("flex h-9 w-9 shrink-0 items-center justify-center rounded-lg", color)}><Icon size={17} /></div>
+                      <h3 className="min-w-0 flex-1 truncate text-sm font-semibold">{assistantName}</h3>
+                    </div>
+                    <p className="mt-1.5 min-h-10 text-xs leading-relaxed text-muted-foreground">{description}</p>
+                    <div className="mt-5 flex items-center gap-1 text-xs font-medium text-primary opacity-70 transition-opacity group-hover:opacity-100">开始使用<ArrowRight size={12} /></div>
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </ScrollArea>
+      <Dialog open={dialogOpen} onOpenChange={open => { if (!open) closeDialog(); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{editTarget ? "编辑助手" : "添加助手"}</DialogTitle>
+            <DialogDescription>{editTarget ? "修改名称或提示词，提示词将作为该助手的系统指令。" : "填写名称和提示词，创建专属助手。提示词将作为该助手的系统指令。"}</DialogDescription>
+          </DialogHeader>
+          <div className="mt-4 space-y-3">
+            <div>
+              <label className="mb-1 block text-xs font-medium text-foreground/70">名称</label>
+              <input value={name} onChange={event => setName(event.target.value)} placeholder="例如：翻译助手" autoFocus className="w-full rounded-lg border bg-background px-3 py-2 text-sm outline-none focus:border-primary/60" />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-medium text-foreground/70">提示词</label>
+              <textarea value={prompt} onChange={event => setPrompt(event.target.value)} placeholder="例如：你是资深翻译，请把用户内容译为地道的中文。" rows={4} className="w-full resize-none rounded-lg border bg-background px-3 py-2 text-sm outline-none focus:border-primary/60" />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="ghost" onClick={closeDialog}>取消</Button>
+            <Button onClick={submit} disabled={!name.trim() || (!editTarget && !prompt.trim())}>保存</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog open={deleteTarget !== null} onOpenChange={open => { if (!open) setDeleteTarget(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>删除助手</DialogTitle>
+            <DialogDescription>确定删除助手「{deleteTarget?.name}」吗？已开始的会话不受影响，此操作不可撤销。</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setDeleteTarget(null)}>取消</Button>
+            <Button variant="destructive" onClick={() => { if (deleteTarget) onDelete(deleteTarget.id); setDeleteTarget(null); }}>删除</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
 }
 
 export default function App() {
   const [storedState] = useState<StoredChatState | null>(() => readStoredChatState());
+  const [assistants, setAssistants] = useState<AssistantDef[]>(() => {
+    const stored = storedState?.assistants;
+    if (!stored) return DEFAULT_ASSISTANTS;
+    return stored.map(storedAssistant => {
+      const builtin = DEFAULT_ASSISTANTS.find(assistant => assistant.id === storedAssistant.id);
+      return builtin ? { ...builtin, ...storedAssistant } : { ...storedAssistant, icon: Bot, color: "bg-primary/10 text-primary" };
+    });
+  });
   const initialSessions = Array.isArray(storedState?.sessions) ? storedState.sessions : [];
   const initialMessages = storedState?.allMessages ?? {};
   const initialActiveSession = storedState?.activeSession && initialSessions.some(session => session.id === storedState.activeSession)
@@ -820,6 +1026,20 @@ export default function App() {
   const [modelsError, setModelsError] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [activeTheme, setActiveTheme] = useState("blue");
+
+  // 兜底：弹窗关闭后清除 radix modal 可能残留的背景滚动/交互锁定，避免页面无法滚动。
+  useEffect(() => {
+    if (editingId !== null) return;
+    const timer = window.setTimeout(() => {
+      const leftover = Array.from(document.body.classList).filter(c => c.startsWith("block-interactivity-") || c.startsWith("allow-interactivity-"));
+      leftover.forEach(c => document.body.classList.remove(c));
+      document.body.style.overflow = "";
+      document.body.style.pointerEvents = "";
+      document.documentElement.style.overflow = "";
+      document.documentElement.style.pointerEvents = "";
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [editingId]);
 
   const messages = allMessages[activeSession] ?? [];
   const activeSessionData = sessions.find(session => session.id === activeSession);
@@ -846,16 +1066,19 @@ export default function App() {
 
   useEffect(() => {
     try {
+      // 持久化时剔除附件的 Blob 预览 URL（刷新即失效，避免残留无效字符串）。
+      const cleanAllMessages = Object.fromEntries(Object.entries(allMessages).map(([sessionId, list]) => [sessionId, list.map(message => message.files ? { ...message, files: message.files.map(file => ({ name: file.name, type: file.type, size: file.size })) } : message)]));
       window.localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify({
         sessions,
-        allMessages,
+        allMessages: cleanAllMessages,
         activeSession,
         selectedModelKey: selectedModel?.key,
+        assistants: assistants.map(({ icon: _icon, color: _color, ...rest }) => rest),
       } satisfies StoredChatState));
     } catch {
       // 本地存储不可用时仍保留当前会话，避免影响正在进行的请求。
     }
-  }, [sessions, allMessages, activeSession, selectedModel]);
+  }, [sessions, allMessages, activeSession, selectedModel, assistants]);
 
   const newSession = () => {
     const id = `new-${Date.now()}`;
@@ -966,7 +1189,7 @@ export default function App() {
       for await (const event of runAgentStream({
         model: modelKey,
         messages: toAgentMessages(requestHistory),
-        instructions: AGENT_INSTRUCTIONS + searchHint + imageHint,
+        instructions: (sessions.find(session => session.id === sessionId)?.instructions ?? AGENT_INSTRUCTIONS) + searchHint + imageHint,
         files,
       })) {
         markUserSent();
@@ -1077,7 +1300,13 @@ export default function App() {
   const sendMessage = (content: string, attachments: File[] = [], tools: string[] = []) => {
     const sessionId = activeSession || `new-${Date.now()}`;
     const id = `${sessionId}-user-${Date.now()}`;
-    const message: Message = { id, role: "user", content, time: formatTime(), status: "sending" };
+    const message: Message = {
+      id, role: "user", content, time: formatTime(), status: "sending",
+      files: attachments.length ? attachments.map(file => ({
+        name: file.name, type: file.type, size: file.size,
+        previewUrl: file.type.startsWith("image/") ? URL.createObjectURL(file) : undefined,
+      })) : undefined,
+    };
     const requestHistory = [...(allMessages[sessionId] ?? []), message];
     setAllMessages(prev => ({ ...prev, [sessionId]: [...(prev[sessionId] ?? []), message] }));
     setSessions(prev => {
@@ -1119,17 +1348,30 @@ export default function App() {
   const deleteSession = (id: string) => { setSessions(prev => prev.filter(session => session.id !== id)); setAllMessages(prev => { const next = { ...prev }; delete next[id]; return next; }); if (id === activeSession) { const next = sessions.find(session => session.id !== id); setActiveSession(next?.id ?? ""); } };
   const changeTheme = (theme: ThemePreset) => { setActiveTheme(theme.key); applyTheme(theme); };
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [deleteSessionTarget, setDeleteSessionTarget] = useState<Session | null>(null);
 
   const content = useMemo(() => {
     if (activePage === "automation") return <AutomationPage sidebarOpen={sidebarOpen} onToggle={() => setSidebarOpen(value => !value)} />;
     if (activePage === "workflow") return <WorkflowPage sidebarOpen={sidebarOpen} onToggle={() => setSidebarOpen(value => !value)} />;
-    if (activePage === "assistant") return <AssistantPage sidebarOpen={sidebarOpen} onToggle={() => setSidebarOpen(value => !value)} onStart={assistantId => { const id = `new-${Date.now()}`; const assistantName = ASSISTANTS.find(assistant => assistant.id === assistantId)?.name ?? "助手"; const message: Message = { id: `${id}-message`, role: "user", content: `你好，请以「${assistantName}」的身份来帮我。`, time: formatTime(), status: "success" }; setSessions(prev => [{ id, title: "新对话", time: "刚刚" }, ...prev]); setAllMessages(prev => ({ ...prev, [id]: [message] })); setActiveSession(id); setActivePage("chat"); }} />;
+    if (activePage === "assistant") return <AssistantPage sidebarOpen={sidebarOpen} onToggle={() => setSidebarOpen(value => !value)} assistants={assistants} onAdd={(name, prompt) => setAssistants(prev => [{ id: `custom-${Date.now()}`, name, description: "自定义助手 · 使用你设定的提示词工作。", prompt, icon: Bot, color: "bg-primary/10 text-primary" }, ...prev])} onEdit={(id, name, prompt) => setAssistants(prev => prev.map(assistant => assistant.id === id ? { ...assistant, name, ...(prompt ? { prompt } : {}) } : assistant))} onStart={assistantId => { const assistant = assistants.find(candidate => candidate.id === assistantId); const assistantName = assistant?.name ?? "助手"; const message: Message = { id: `${assistantId}-message`, role: "user", content: `你好，请以「${assistantName}」的身份来帮我。`, time: formatTime(), status: "success" }; setSessions(prev => [{ id: assistantId, title: assistantName, time: "刚刚", ...(assistant?.prompt ? { instructions: assistant.prompt } : {}) }, ...prev]); setAllMessages(prev => ({ ...prev, [assistantId]: [message] })); setActiveSession(assistantId); setActivePage("chat"); }} onDelete={assistantId => setAssistants(prev => prev.filter(assistant => assistant.id !== assistantId))} />;
     return <ChatPage session={activeSessionData} messages={messages} model={selectedModel} models={models} modelsLoading={modelsLoading} modelsError={modelsError} sidebarOpen={sidebarOpen} onToggleSidebar={() => setSidebarOpen(value => !value)} onModelChange={model => { setSelectedModel(model); if (activeSession) setSessions(prev => prev.map(session => session.id === activeSession ? { ...session, modelKey: model.key } : session)); }} onReloadModels={() => { void loadModels(); }}     onSend={(contentValue, attachments, tools) => sendMessage(contentValue, attachments, tools)} onRetry={retryMessage} tools={activeSessionData?.tools ?? []} onToolsChange={tools => { if (!activeSession) return; setSessions(prev => prev.map(session => session.id === activeSession ? { ...session, tools } : session)); }} />;
   }, [activePage, activeSessionData, allMessages, messages, models, modelsLoading, modelsError, selectedModel, sidebarOpen]);
 
   return (
     <PreviewContext.Provider value={{ openPreview: setPreviewUrl }}>
-      <TooltipProvider delayDuration={400}><div className="flex h-screen w-full overflow-hidden bg-background" style={{ fontFamily: "Inter, system-ui, sans-serif" }}><Sidebar open={sidebarOpen} activePage={activePage} sessions={sessions} activeSession={activeSession} editingId={editingId} onPageChange={setActivePage} onNewSession={newSession} onSessionChange={id => { setActiveSession(id); setActivePage("chat"); const target = sessions.find(session => session.id === id); if (target?.modelKey) { const savedModel = models.find(model => model.key === target.modelKey); if (savedModel) setSelectedModel(savedModel); } }} onStartEdit={startEdit} onSaveEdit={saveEdit} onDeleteSession={deleteSession} activeTheme={activeTheme} onThemeChange={changeTheme} onClose={() => setSidebarOpen(false)} /><main className="flex min-w-0 flex-1 flex-col overflow-hidden">{content}</main></div></TooltipProvider>
+      <TooltipProvider delayDuration={400}><div className="flex h-screen w-full overflow-hidden bg-background" style={{ fontFamily: "Inter, system-ui, sans-serif" }}><Sidebar open={sidebarOpen} activePage={activePage} sessions={sessions} activeSession={activeSession} editingId={editingId} onPageChange={setActivePage} onNewSession={newSession} onSessionChange={id => { setActiveSession(id); setActivePage("chat"); const target = sessions.find(session => session.id === id); if (target?.modelKey) { const savedModel = models.find(model => model.key === target.modelKey); if (savedModel) setSelectedModel(savedModel); } }} onStartEdit={startEdit} onSaveEdit={saveEdit} onCloseEdit={() => setEditingId(null)} onDeleteSession={id => setDeleteSessionTarget(sessions.find(session => session.id === id) ?? null)} activeTheme={activeTheme} onThemeChange={changeTheme} onClose={() => setSidebarOpen(false)} /><main className="flex min-w-0 flex-1 flex-col overflow-hidden">{content}</main></div></TooltipProvider>
+      <Dialog open={deleteSessionTarget !== null} onOpenChange={open => { if (!open) setDeleteSessionTarget(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>删除会话</DialogTitle>
+            <DialogDescription>确定删除会话「{deleteSessionTarget?.title}」吗？其中的消息将被一并删除，此操作不可撤销。</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setDeleteSessionTarget(null)}>取消</Button>
+            <Button variant="destructive" onClick={() => { if (deleteSessionTarget) deleteSession(deleteSessionTarget.id); setDeleteSessionTarget(null); }}>删除</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       {previewUrl && <Lightbox url={previewUrl} onClose={() => setPreviewUrl(null)} />}
     </PreviewContext.Provider>
   );
