@@ -102,6 +102,17 @@ const AKM_EDIT_IMAGE_TOOL: AgentTool = {
   },
 };
 
+// 获取服务器当前时间（对应后端内置 akm_get_time，无参数）。
+// 只读且无害，作为始终声明的基础工具，避免开启其它工具开关后因白名单注入丢失。
+const AKM_GET_TIME_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_get_time",
+    description: "获取服务器当前时间，返回本地 ISO 时间、UTC 时间、UNIX 时间戳与时区",
+    parameters: { type: "object", properties: {} },
+  },
+};
+
 // 只读文件工具（对应后端内置工作区文件工具，需在服务端配置 agent_workspace_root 才会注册）。
 // 仅提供读取能力：读取内容 / 列出目录 / glob 匹配 / 正则搜索 / 文件元信息，均在服务端工作区沙箱内。
 const AKM_READ_FILE_TOOL: AgentTool = {
@@ -183,12 +194,14 @@ const AKM_FILE_INFO_TOOL: AgentTool = {
 };
 
 // 按客户端 UI 工具开关（"search" / "image" / "files"）映射为显式声明的工具定义列表。
-// 开启哪个声明哪个；"image" 同时声明生成与编辑，模型可先生成拿到 local_path 再编辑；
+// akm_get_time 作为基础工具始终声明（后端全关时也会默认注入，这里保证开启其它开关时不丢失）；
+// "image" 同时声明生成与编辑，模型可先生成拿到 local_path 再编辑；
 // "files" 只声明只读文件工具（读文件/列目录/glob/grep/文件信息），不声明写文件与 shell。
-// 全关时返回空数组（调用方据此不携带 tools 字段，
+// 全关时仍返回空数组（调用方据此不携带 tools 字段，
 // 后端默认不注入联网搜索/图片生成/编辑/写文件/shell 工具）。
 export function resolveDeclaredTools(tools: string[]): AgentTool[] {
   const declared: AgentTool[] = [];
+  declared.push(AKM_GET_TIME_TOOL);
   if (tools.includes("search")) declared.push(TAVILY_SEARCH_TOOL);
   if (tools.includes("image")) {
     declared.push(AKM_GENERATE_IMAGE_TOOL, AKM_EDIT_IMAGE_TOOL);
