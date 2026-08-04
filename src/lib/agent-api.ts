@@ -115,7 +115,16 @@ export function resolveDeclaredTools(tools: string[]): AgentTool[] {
   return declared;
 }
 
-export type AgentStreamEventName = "reasoning_delta" | "model_delta" | "turn_start" | "tool_call" | "tool_result" | "final" | "error";
+export type AgentStreamEventName = "reasoning_delta" | "model_delta" | "turn_start" | "tool_call" | "tool_result" | "context_warning" | "final" | "error";
+
+// 上下文占用警告信息（对应后端 context_warning 事件）：
+// 上下文估算已用 / 上限 / 剩余 tokens、占用比例与已压缩次数。
+export type ContextWarning = {
+  estimated_tokens: number;
+  max_tokens: number;
+  remaining_tokens: number;
+  ratio: number;
+};
 
 export type AgentStreamEvent = {
   event: AgentStreamEventName;
@@ -130,6 +139,13 @@ export type AgentStreamEvent = {
     turns?: number;
     usage?: Record<string, number>;
     error?: string;
+    // 上下文管理信息：context_warning 事件携带占用估算与比例（平铺字段，
+    // 与后端 _sse_event 下发格式一致），final 事件携带 compacted（本次运行自动压缩次数）。
+    estimated_tokens?: number;
+    max_tokens?: number;
+    remaining_tokens?: number;
+    ratio?: number;
+    compacted?: number;
   };
 };
 
@@ -232,7 +248,7 @@ export async function runAgent(options: {
 }
 
 function isAgentStreamEventName(value: unknown): value is AgentStreamEventName {
-  return value === "reasoning_delta" || value === "model_delta" || value === "turn_start" || value === "tool_call" || value === "tool_result" || value === "final" || value === "error";
+  return value === "reasoning_delta" || value === "model_delta" || value === "turn_start" || value === "tool_call" || value === "tool_result" || value === "context_warning" || value === "final" || value === "error";
 }
 
 function parseAgentStreamFrame(frame: string): AgentStreamEvent | null {
