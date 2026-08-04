@@ -78,13 +78,40 @@ const AKM_GENERATE_IMAGE_TOOL: AgentTool = {
   },
 };
 
+// 图像编辑工具（对应后端内置 akm_edit_image）。读取本地图片（生成工具返回的 local_path
+// 或用户上传时后端落盘的路径）进行编辑，需配置 image_supported_models 对应可用 Key。
+const AKM_EDIT_IMAGE_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_edit_image",
+    description: "读取本地图片并编辑（如重绘局部、扩展内容），返回编辑后的图片资源列表。每项含 url，并附带保存到本地的 local_path 与可访问的 http_url（/agent-uploads/...），保存失败时含 save_error。需要提供服务器可访问的图片路径，以及配置了对应模型的可用 API Key",
+    parameters: {
+      type: "object",
+      properties: {
+        image_path: { type: "string", description: "本地图片文件的绝对路径" },
+        prompt: { type: "string", description: "编辑指令，描述期望的修改效果" },
+        model: { type: "string", description: "图片编辑模型，默认取 image_supported_models 首项" },
+        mask_path: { type: "string", description: "本地蒙版图片路径，用于限定重绘区域，可选" },
+        size: { type: "string", description: "输出图片尺寸，如 1024x1024，可选" },
+        quality: { type: "string", description: "生成质量，如 standard 或 hd，可选" },
+        output_format: { type: "string", description: "输出格式，如 png 或 jpeg，可选" },
+        n: { type: "integer", description: "生成张数，默认 1" },
+      },
+      required: ["image_path", "prompt"],
+    },
+  },
+};
+
 // 按客户端 UI 工具开关（"search" / "image"）映射为显式声明的工具定义列表。
-// 开启哪个声明哪个；全关时返回空数组（调用方据此不携带 tools 字段，
+// 开启哪个声明哪个；"image" 同时声明生成与编辑，模型可先生成拿到 local_path 再编辑。
+// 全关时返回空数组（调用方据此不携带 tools 字段，
 // 后端默认不注入联网搜索/图片生成/编辑工具）。
 export function resolveDeclaredTools(tools: string[]): AgentTool[] {
   const declared: AgentTool[] = [];
   if (tools.includes("search")) declared.push(TAVILY_SEARCH_TOOL);
-  if (tools.includes("image")) declared.push(AKM_GENERATE_IMAGE_TOOL);
+  if (tools.includes("image")) {
+    declared.push(AKM_GENERATE_IMAGE_TOOL, AKM_EDIT_IMAGE_TOOL);
+  }
   return declared;
 }
 
