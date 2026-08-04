@@ -185,9 +185,15 @@ function readStoredChatState(): StoredChatState | null {
     if (!raw) return null;
     const parsed = JSON.parse(raw) as StoredChatState;
     if (parsed && typeof parsed === "object") {
-      // 迁移旧数据：早期会话时间硬编码为"刚刚"的固定字符串，刷新后永远不变，这里补上当前时刻。
+      // 迁移旧数据：会话时间跟随最后一条消息的时间（空会话保留创建时间），
+      // 早期"刚刚"硬编码的会话补上当前时刻。
       if (Array.isArray(parsed.sessions)) {
-        parsed.sessions = parsed.sessions.map(session => (session.time === "刚刚" ? { ...session, time: formatTime() } : session));
+        parsed.sessions = parsed.sessions.map(session => {
+          const list = parsed.allMessages?.[session.id];
+          const lastTime = list && list.length > 0 ? list[list.length - 1].time : "";
+          const time = lastTime || (session.time === "刚刚" ? nowTime() : session.time);
+          return { ...session, time };
+        });
       }
       return parsed;
     }
@@ -206,8 +212,29 @@ function toChatModel(model: ApiModel): ChatModel {
   };
 }
 
-function formatTime(date = new Date()) {
-  return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" }).format(date);
+// 存储用完整时间戳（ISO 字符串），保留日期信息以便会话时间按"今天/本周/更早"智能展示。
+function nowTime(date = new Date()) {
+  return date.toISOString();
+}
+
+// 会话时间智能展示：今天显示 HH:mm，本周内（非今天）显示周几，更早显示 MM:DD。
+// 兼容无日期信息的旧数据（如 "14:30"），无法解析时原样返回。
+function formatDisplayTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  const now = new Date();
+  if (date.toDateString() === now.toDateString()) {
+    return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" }).format(date);
+  }
+  const startOfWeek = new Date(now);
+  startOfWeek.setHours(0, 0, 0, 0);
+  startOfWeek.setDate(startOfWeek.getDate() - ((startOfWeek.getDay() + 6) % 7));
+  if (date >= startOfWeek) {
+    return ["周日", "周一", "周二", "周三", "周四", "周五", "周六"][date.getDay()];
+  }
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${month}:${day}`;
 }
 
 function extractTextContent(content: unknown): string {
@@ -238,24 +265,16 @@ function messageText(message: Message): string {
   return message.content;
 }
 
-// 上下文管理提示条：展示本次回复的自动压缩次数与上下文占用告警。
-// 压缩发生在服务端，前端仅消费 context_warning / final.compacted 事件做展示。
-function ContextHint({ warning, compacted }: { warning?: ContextWarning; compacted?: number }) {
-  if (!warning && !(compacted && compacted > 0)) return null;
+// 上下文管理提示条：展示本次回复的自动压缩次数。
+// 压缩发生在服务端，前端仅消费 final.compacted 事件做展示。
+function ContextHint({ compacted }: { compacted?: number }) {
+  if (!compacted || compacted <= 0) return null;
   return (
     <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 px-0.5 text-[11px] text-muted-foreground">
-      {warning && (
-        <span className="inline-flex items-center gap-1">
-          <AlertCircle size={11} className="shrink-0 text-amber-500" />
-          上下文占用已达上限的 {Math.round(warning.ratio * 100)}%（剩余约 {warning.remaining_tokens.toLocaleString()} tokens）
-        </span>
-      )}
-      {compacted && compacted > 0 && (
-        <span className="inline-flex items-center gap-1">
-          <Check size={11} className="shrink-0 text-primary" />
-          已自动压缩上下文 {compacted} 次
-        </span>
-      )}
+      <span className="inline-flex items-center gap-1">
+        <Check size={11} className="shrink-0 text-primary" />
+        已自动压缩上下文 {compacted} 次
+      </span>
     </div>
   );
 }
@@ -279,6 +298,16 @@ function applyTheme(theme: ThemePreset, dark = false) {
   root.style.setProperty("--accent-foreground", dark ? "#f8fafc" : theme.primary);
   root.style.setProperty("--ring", colors.primary);
   root.style.setProperty("--sidebar-primary", colors.primary);
+}
+
+// 清除 Radix modal 可能残留的背景滚动/交互锁定（body/html 的 overflow 与 pointer-events），避免页面无法滚动/点击。
+function clearModalResidue() {
+  const leftover = Array.from(document.body.classList).filter(c => c.startsWith("block-interactivity-") || c.startsWith("allow-interactivity-"));
+  leftover.forEach(c => document.body.classList.remove(c));
+  document.body.style.overflow = "";
+  document.body.style.pointerEvents = "";
+  document.documentElement.style.overflow = "";
+  document.documentElement.style.pointerEvents = "";
 }
 
 function nodeToText(node: ReactNode): string {
@@ -630,7 +659,7 @@ function Sidebar({
                 <ContextMenuTrigger asChild>
                   <div onClick={() => onSessionChange(session.id)} className={cn("mb-0.5 flex w-full cursor-pointer select-none items-center gap-1 rounded-md px-2.5 py-2 text-left transition-colors", session.id === activeSession ? "bg-primary/10 text-primary" : "text-foreground/55 hover:bg-black/[0.05] hover:text-foreground/80 dark:hover:bg-white/10 dark:hover:text-foreground")}>
                     <span className="min-w-0 flex-1 truncate text-sm leading-snug">{session.title}</span>
-                    <span className="shrink-0 whitespace-nowrap text-xs text-foreground/30">{session.time}</span>
+                    <span className="shrink-0 whitespace-nowrap text-xs text-foreground/30">{formatDisplayTime(session.time)}</span>
                   </div>
                 </ContextMenuTrigger>
                 <ContextMenuContent className="w-44">
@@ -933,8 +962,8 @@ function ChatPage({
                 </>
               )}
               {message.status === "recv_failed" && <StatusNotice status="recv_failed" error={message.error} onRetry={() => onRetry(message.id)} />}
-              <ContextHint warning={message.contextWarning} compacted={message.compacted} />
-              {messageText(message) && <div className="mt-1.5 flex items-center justify-between px-0.5"><MessageActions text={messageText(message)} /><span className="text-xs text-muted-foreground">{message.status === "sending" ? message.streamStatus : message.time}</span></div>}
+              <ContextHint compacted={message.compacted} />
+              {messageText(message) && <div className="mt-1.5 flex items-center justify-between px-0.5"><MessageActions text={messageText(message)} /><span className="text-xs text-muted-foreground">{message.status === "sending" ? message.streamStatus : formatDisplayTime(message.time)}</span></div>}
             </div>
           </div>
         ) : (
@@ -945,7 +974,7 @@ function ChatPage({
               {message.files?.length ? <div className="mt-1.5 flex max-w-full flex-wrap justify-end gap-1.5">{message.files.map(file => file.type.startsWith("image/") && file.previewUrl ? <button key={`${file.name}-${file.size}`} type="button" aria-label={`预览${file.name}`} onClick={() => openPreview(file.previewUrl!)} className="overflow-hidden rounded-lg border border-primary/30 bg-white shadow-sm transition-transform hover:scale-105 dark:bg-muted"><img src={file.previewUrl} alt={file.name} className="h-12 w-12 object-cover" /></button> : <div key={`${file.name}-${file.size}`} className="flex max-w-[200px] items-center gap-1.5 rounded-lg border border-primary/30 bg-white px-2.5 py-1 text-xs font-medium text-primary dark:bg-muted"><ImageIcon size={11} className="shrink-0 text-primary/70" /><span className="truncate">{file.name}</span></div>)}</div> : null}
               {message.status === "sending" && <div className="mt-1 flex items-center gap-1"><Loader2 size={10} className="animate-spin text-muted-foreground" /><span className="text-xs text-muted-foreground">发送中…</span></div>}
               {message.status === "send_failed" && <StatusNotice status="send_failed" onRetry={() => onRetry(message.id)} />}
-              {message.status === "success" && <span className="mt-1 text-xs text-muted-foreground">{message.time}</span>}
+              {message.status === "success" && <span className="mt-1 text-xs text-muted-foreground">{formatDisplayTime(message.time)}</span>}
             </div>
           </div>
         ))}
@@ -998,12 +1027,20 @@ function AssistantPage({ sidebarOpen, onToggle, onStart, assistants, onAdd, onEd
   const [name, setName] = useState("");
   const [prompt, setPrompt] = useState("");
 
+  // 关闭删除助手弹窗：受控 Dialog 点按钮关闭时不会触发 onOpenChange，
+  // 这里统一在关闭时延迟清除 body 残留的滚动/交互锁定。
+  const closeDeleteTarget = () => {
+    setDeleteTarget(null);
+    window.setTimeout(clearModalResidue, 250);
+  };
+
   // 关闭对话框并清空表单，避免残留上次的编辑/添加状态。
   const closeDialog = () => {
     setDialogOpen(false);
     setEditTarget(null);
     setName("");
     setPrompt("");
+    window.setTimeout(clearModalResidue, 250);
   };
 
   // 打开编辑对话框：预填当前助手的名称与提示词。
@@ -1085,15 +1122,15 @@ function AssistantPage({ sidebarOpen, onToggle, onStart, assistants, onAdd, onEd
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      <Dialog open={deleteTarget !== null} onOpenChange={open => { if (!open) setDeleteTarget(null); }}>
+      <Dialog open={deleteTarget !== null} onOpenChange={open => { if (!open) closeDeleteTarget(); }}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>删除助手</DialogTitle>
             <DialogDescription>确定删除助手「{deleteTarget?.name}」吗？已开始的会话不受影响，此操作不可撤销。</DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="ghost" onClick={() => setDeleteTarget(null)}>取消</Button>
-            <Button variant="destructive" onClick={() => { if (deleteTarget) onDelete(deleteTarget.id); setDeleteTarget(null); }}>删除</Button>
+            <Button variant="ghost" onClick={closeDeleteTarget}>取消</Button>
+            <Button variant="destructive" onClick={() => { if (deleteTarget) onDelete(deleteTarget.id); closeDeleteTarget(); }}>删除</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -1149,14 +1186,7 @@ export default function App() {
   // 兜底：弹窗关闭后清除 radix modal 可能残留的背景滚动/交互锁定，避免页面无法滚动。
   useEffect(() => {
     if (editingId !== null) return;
-    const timer = window.setTimeout(() => {
-      const leftover = Array.from(document.body.classList).filter(c => c.startsWith("block-interactivity-") || c.startsWith("allow-interactivity-"));
-      leftover.forEach(c => document.body.classList.remove(c));
-      document.body.style.overflow = "";
-      document.body.style.pointerEvents = "";
-      document.documentElement.style.overflow = "";
-      document.documentElement.style.pointerEvents = "";
-    }, 250);
+    const timer = window.setTimeout(clearModalResidue, 250);
     return () => window.clearTimeout(timer);
   }, [editingId]);
 
@@ -1236,7 +1266,7 @@ export default function App() {
 
   const newSession = () => {
     const id = `new-${Date.now()}`;
-    setSessions(prev => [{ id, title: "新对话", time: formatTime() }, ...prev]);
+    setSessions(prev => [{ id, title: "新对话", time: nowTime() }, ...prev]);
     setAllMessages(prev => ({ ...prev, [id]: [] }));
     setActiveSession(id);
     setActivePage("chat");
@@ -1256,7 +1286,7 @@ export default function App() {
       id: assistantMessageId,
       role: "assistant",
       content: "",
-      time: formatTime(),
+      time: nowTime(),
       status: "sending",
       streamStatus: "正在连接 Agent…",
     };
@@ -1433,9 +1463,9 @@ export default function App() {
                if (message.id !== assistantMessageId) return message;
                return {
                  ...message,
-                content,
+                 content,
                 segments: segments.slice(),
-                time: formatTime(),
+                time: nowTime(),
                 status: "success" as const,
                 streamStatus: undefined,
                 // final 事件携带本次运行自动压缩次数，>0 时在消息底部提示。
@@ -1472,7 +1502,7 @@ export default function App() {
     const sessionId = activeSession || `new-${Date.now()}`;
     const id = `${sessionId}-user-${Date.now()}`;
     const message: Message = {
-      id, role: "user", content, time: formatTime(), status: "sending",
+      id, role: "user", content, time: nowTime(), status: "sending",
       files: attachments.length ? attachments.map(file => ({
         name: file.name, type: file.type, size: file.size,
         previewUrl: file.type.startsWith("image/") ? URL.createObjectURL(file) : undefined,
@@ -1482,7 +1512,7 @@ export default function App() {
     setAllMessages(prev => ({ ...prev, [sessionId]: [...(prev[sessionId] ?? []), message] }));
     setSessions(prev => {
       if (!prev.some(session => session.id === sessionId)) {
-        return [{ id: sessionId, title: content.slice(0, 22), time: formatTime() }, ...prev];
+        return [{ id: sessionId, title: content.slice(0, 22), time: nowTime() }, ...prev];
       }
       return prev.map(session => session.id === sessionId && session.title === "新对话" ? { ...session, title: content.slice(0, 22) } : session);
     });
@@ -1524,6 +1554,13 @@ export default function App() {
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [deleteSessionTarget, setDeleteSessionTarget] = useState<Session | null>(null);
 
+  // 关闭删除会话弹窗：受控 Dialog 点按钮关闭时不会触发 onOpenChange，
+  // 这里统一在关闭时延迟清除 body 残留的滚动/交互锁定。
+  const closeDeleteSessionDialog = () => {
+    setDeleteSessionTarget(null);
+    window.setTimeout(clearModalResidue, 250);
+  };
+
   // 侧边栏会话时间显示为"最后聊天时间"：取该会话最后一条消息的时间，无消息的空会话用创建时间。
   const displaySessions = sessions.map(session => {
     const list = allMessages[session.id];
@@ -1533,22 +1570,22 @@ export default function App() {
   const content = useMemo(() => {
     if (activePage === "automation") return <AutomationPage sidebarOpen={sidebarOpen} onToggle={() => setSidebarOpen(value => !value)} />;
     if (activePage === "workflow") return <WorkflowPage sidebarOpen={sidebarOpen} onToggle={() => setSidebarOpen(value => !value)} />;
-    if (activePage === "assistant") return <AssistantPage sidebarOpen={sidebarOpen} onToggle={() => setSidebarOpen(value => !value)} assistants={assistants} onAdd={(name, prompt) => setAssistants(prev => [{ id: `custom-${Date.now()}`, name, description: "自定义助手 · 使用你设定的提示词工作。", prompt, icon: Bot, color: "bg-primary/10 text-primary" }, ...prev])} onEdit={(id, name, prompt) => setAssistants(prev => prev.map(assistant => assistant.id === id ? { ...assistant, name, ...(prompt ? { prompt } : {}) } : assistant))} onStart={assistantId => { const assistant = assistants.find(candidate => candidate.id === assistantId); const assistantName = assistant?.name ?? "助手"; const message: Message = { id: `${assistantId}-message`, role: "user", content: `你好，请以「${assistantName}」的身份来帮我。`, time: formatTime(), status: "success" }; setSessions(prev => [{ id: assistantId, title: assistantName, time: formatTime(), ...(assistant?.prompt ? { instructions: assistant.prompt } : {}) }, ...prev]); setAllMessages(prev => ({ ...prev, [assistantId]: [message] })); setActiveSession(assistantId); setActivePage("chat"); }} onDelete={assistantId => setAssistants(prev => prev.filter(assistant => assistant.id !== assistantId))} />;
+    if (activePage === "assistant") return <AssistantPage sidebarOpen={sidebarOpen} onToggle={() => setSidebarOpen(value => !value)} assistants={assistants} onAdd={(name, prompt) => setAssistants(prev => [{ id: `custom-${Date.now()}`, name, description: "自定义助手 · 使用你设定的提示词工作。", prompt, icon: Bot, color: "bg-primary/10 text-primary" }, ...prev])} onEdit={(id, name, prompt) => setAssistants(prev => prev.map(assistant => assistant.id === id ? { ...assistant, name, ...(prompt ? { prompt } : {}) } : assistant))} onStart={assistantId => { const assistant = assistants.find(candidate => candidate.id === assistantId); const assistantName = assistant?.name ?? "助手"; const message: Message = { id: `${assistantId}-message`, role: "user", content: `你好，请以「${assistantName}」的身份来帮我。`, time: nowTime(), status: "success" }; setSessions(prev => [{ id: assistantId, title: assistantName, time: nowTime(), ...(assistant?.prompt ? { instructions: assistant.prompt } : {}) }, ...prev]); setAllMessages(prev => ({ ...prev, [assistantId]: [message] })); setActiveSession(assistantId); setActivePage("chat"); }} onDelete={assistantId => setAssistants(prev => prev.filter(assistant => assistant.id !== assistantId))} />;
     return <ChatPage session={activeSessionData} messages={messages} model={selectedModel} models={models} modelsLoading={modelsLoading} modelsError={modelsError} sidebarOpen={sidebarOpen} onToggleSidebar={() => setSidebarOpen(value => !value)} onModelChange={model => { setSelectedModel(model); if (activeSession) setSessions(prev => prev.map(session => session.id === activeSession ? { ...session, modelKey: model.key } : session)); }} onReloadModels={() => { void loadModels(); }}     onSend={(contentValue, attachments, tools) => sendMessage(contentValue, attachments, tools)} onRetry={retryMessage} tools={activeSessionData?.tools ?? []} onToolsChange={tools => { if (!activeSession) return; setSessions(prev => prev.map(session => session.id === activeSession ? { ...session, tools } : session)); }} />;
   }, [activePage, activeSessionData, allMessages, messages, models, modelsLoading, modelsError, selectedModel, sidebarOpen]);
 
   return (
     <PreviewContext.Provider value={{ openPreview: setPreviewUrl }}>
       <TooltipProvider delayDuration={400}><div className="flex h-screen w-full overflow-hidden bg-background" style={{ fontFamily: "Inter, system-ui, sans-serif" }}><Sidebar open={sidebarOpen} activePage={activePage} sessions={displaySessions} activeSession={activeSession} editingId={editingId} onPageChange={setActivePage} onNewSession={newSession} onSessionChange={id => { setActiveSession(id); setActivePage("chat"); const target = sessions.find(session => session.id === id); if (target?.modelKey) { const savedModel = models.find(model => model.key === target.modelKey); if (savedModel) setSelectedModel(savedModel); } }} onStartEdit={startEdit} onSaveEdit={saveEdit} onCloseEdit={() => setEditingId(null)} onDeleteSession={id => setDeleteSessionTarget(sessions.find(session => session.id === id) ?? null)} activeTheme={activeTheme} onThemeChange={changeTheme} themeMode={themeMode} onThemeModeChange={changeThemeMode} onClose={() => setSidebarOpen(false)} /><main className="flex min-w-0 flex-1 flex-col overflow-hidden">{content}</main></div></TooltipProvider>
-      <Dialog open={deleteSessionTarget !== null} onOpenChange={open => { if (!open) setDeleteSessionTarget(null); }}>
+      <Dialog open={deleteSessionTarget !== null} onOpenChange={open => { if (!open) closeDeleteSessionDialog(); }}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>删除会话</DialogTitle>
             <DialogDescription>确定删除会话「{deleteSessionTarget?.title}」吗？其中的消息将被一并删除，此操作不可撤销。</DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="ghost" onClick={() => setDeleteSessionTarget(null)}>取消</Button>
-            <Button variant="destructive" onClick={() => { if (deleteSessionTarget) deleteSession(deleteSessionTarget.id); setDeleteSessionTarget(null); }}>删除</Button>
+            <Button variant="ghost" onClick={closeDeleteSessionDialog}>取消</Button>
+            <Button variant="destructive" onClick={() => { if (deleteSessionTarget) deleteSession(deleteSessionTarget.id); closeDeleteSessionDialog(); }}>删除</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
