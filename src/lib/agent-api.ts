@@ -102,15 +102,99 @@ const AKM_EDIT_IMAGE_TOOL: AgentTool = {
   },
 };
 
-// 按客户端 UI 工具开关（"search" / "image"）映射为显式声明的工具定义列表。
-// 开启哪个声明哪个；"image" 同时声明生成与编辑，模型可先生成拿到 local_path 再编辑。
+// 只读文件工具（对应后端内置工作区文件工具，需在服务端配置 agent_workspace_root 才会注册）。
+// 仅提供读取能力：读取内容 / 列出目录 / glob 匹配 / 正则搜索 / 文件元信息，均在服务端工作区沙箱内。
+const AKM_READ_FILE_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_read_file",
+    description: "读取工作区内文本文件的内容（带行级分页与长度限制）。仅能访问 agent_workspace_root 配置的工作区目录",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "工作区内的文件路径（绝对路径或相对工作区根目录的路径）" },
+        offset: { type: "integer", description: "起始行号（从 0 开始），默认 0" },
+        limit: { type: "integer", description: "返回的最大行数，-1 表示读到结尾，默认 -1" },
+      },
+      required: ["path"],
+    },
+  },
+};
+
+const AKM_LIST_DIR_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_list_dir",
+    description: "列出工作区内目录下的条目（名称、类型、大小），用于感知工作区结构",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "工作区内的目录路径，留空表示工作区根目录" },
+      },
+    },
+  },
+};
+
+const AKM_GLOB_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_glob",
+    description: "在工作区内按 glob 模式匹配文件或目录路径（相对工作区根目录返回），如 **/*.py",
+    parameters: {
+      type: "object",
+      properties: {
+        pattern: { type: "string", description: "glob 匹配模式，如 **/*.py" },
+      },
+      required: ["pattern"],
+    },
+  },
+};
+
+const AKM_GREP_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_grep",
+    description: "在工作区内按正则搜索文件内容，返回命中的文件、行号与行内容",
+    parameters: {
+      type: "object",
+      properties: {
+        pattern: { type: "string", description: "要搜索的正则表达式" },
+        path: { type: "string", description: "限定搜索的目录或文件（工作区内），留空递归搜索整个工作区" },
+        case_sensitive: { type: "boolean", description: "是否区分大小写，默认 false" },
+      },
+      required: ["pattern"],
+    },
+  },
+};
+
+const AKM_FILE_INFO_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_file_info",
+    description: "返回工作区内文件或目录的元信息（类型、大小、修改时间）",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "工作区内的文件或目录路径" },
+      },
+      required: ["path"],
+    },
+  },
+};
+
+// 按客户端 UI 工具开关（"search" / "image" / "files"）映射为显式声明的工具定义列表。
+// 开启哪个声明哪个；"image" 同时声明生成与编辑，模型可先生成拿到 local_path 再编辑；
+// "files" 只声明只读文件工具（读文件/列目录/glob/grep/文件信息），不声明写文件与 shell。
 // 全关时返回空数组（调用方据此不携带 tools 字段，
-// 后端默认不注入联网搜索/图片生成/编辑工具）。
+// 后端默认不注入联网搜索/图片生成/编辑/写文件/shell 工具）。
 export function resolveDeclaredTools(tools: string[]): AgentTool[] {
   const declared: AgentTool[] = [];
   if (tools.includes("search")) declared.push(TAVILY_SEARCH_TOOL);
   if (tools.includes("image")) {
     declared.push(AKM_GENERATE_IMAGE_TOOL, AKM_EDIT_IMAGE_TOOL);
+  }
+  if (tools.includes("files")) {
+    declared.push(AKM_READ_FILE_TOOL, AKM_LIST_DIR_TOOL, AKM_GLOB_TOOL, AKM_GREP_TOOL, AKM_FILE_INFO_TOOL);
   }
   return declared;
 }

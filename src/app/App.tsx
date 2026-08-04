@@ -990,7 +990,7 @@ function ChatPage({
               <input ref={fileInputRef} type="file" multiple accept="image/*,.txt" className="hidden" onChange={event => { setAttachments(prev => [...prev, ...Array.from(event.target.files ?? [])]); event.target.value = ""; }} />
               <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="sm" className="h-7 gap-1.5 text-xs text-muted-foreground hover:text-foreground" onClick={() => fileInputRef.current?.click()}><Paperclip size={13} />附件</Button></TooltipTrigger><TooltipContent>上传文件</TooltipContent></Tooltip>
               <Separator orientation="vertical" className="mx-1 h-4" />
-              {[{ id: "search", icon: Search, label: "联网搜索" }, { id: "image", icon: ImageIcon, label: "图像生成" }].map(({ id, icon: Icon, label }) => <Tooltip key={id}><TooltipTrigger asChild><Button variant={tools.includes(id) ? "secondary" : "ghost"} size="sm" className={cn("h-7 gap-1.5 text-xs", tools.includes(id) ? "text-primary" : "text-muted-foreground hover:text-foreground")} onClick={() => onToolsChange(tools.includes(id) ? tools.filter(item => item !== id) : [...tools, id])}><Icon size={13} /><span className="hidden lg:inline">{label}</span></Button></TooltipTrigger><TooltipContent>{label}</TooltipContent></Tooltip>)}
+              {[{ id: "search", icon: Search, label: "联网搜索" }, { id: "image", icon: ImageIcon, label: "图像生成" }, { id: "files", icon: FileText, label: "读取文件" }].map(({ id, icon: Icon, label }) => <Tooltip key={id}><TooltipTrigger asChild><Button variant={tools.includes(id) ? "secondary" : "ghost"} size="sm" className={cn("h-7 gap-1.5 text-xs", tools.includes(id) ? "text-primary" : "text-muted-foreground hover:text-foreground")} onClick={() => onToolsChange(tools.includes(id) ? tools.filter(item => item !== id) : [...tools, id])}><Icon size={13} /><span className="hidden lg:inline">{label}</span></Button></TooltipTrigger><TooltipContent>{label}</TooltipContent></Tooltip>)}
             </div>
             <div className="flex min-w-0 items-center gap-2">
               <ModelSettingsPopover model={model} models={models} modelsLoading={modelsLoading} modelsError={modelsError} onModelChange={onModelChange} onReloadModels={onReloadModels} />
@@ -1369,15 +1369,18 @@ export default function App() {
       const imageHint = tools.includes("image")
         ? "\n用户已开启图像生成，如需生成图片请调用 akm_generate_image 工具；生成完成后请把返回的图片 URL 以 Markdown 图片语法 ![图片](url) 写进回复正文，方便用户直接查看。"
         : "";
-      // 按 UI 工具开关显式声明工具（白名单）：开启联网搜索/图像生成时只声明对应工具；
-      // 全关时不传 tools，后端默认不会注入联网搜索/图片生成/编辑工具，
-      // 模型拿不到这些工具定义，不会自主联网或生成图片。
+      const filesHint = tools.includes("files")
+        ? "\n用户已开启工作区文件读取，如需要查看、搜索或了解工作区内的文件（代码/文档等），可调用 akm_read_file / akm_list_dir / akm_glob / akm_grep / akm_file_info 等只读工具获取内容。"
+        : "";
+      // 按 UI 工具开关显式声明工具（白名单）：开启联网搜索/图像生成/文件读取时只声明对应工具；
+      // 全关时不传 tools，后端默认不会注入联网搜索/图片生成/编辑/文件写与 shell 工具，
+      // 模型拿不到这些工具定义，不会自主联网、生成图片或读写文件。
       const declaredTools = resolveDeclaredTools(tools);
 
       for await (const event of runAgentStream({
         model: modelKey,
         messages: toAgentMessages(requestHistory),
-        instructions: (sessions.find(session => session.id === sessionId)?.instructions ?? AGENT_INSTRUCTIONS) + searchHint + imageHint,
+        instructions: (sessions.find(session => session.id === sessionId)?.instructions ?? AGENT_INSTRUCTIONS) + searchHint + imageHint + filesHint,
         tools: declaredTools.length ? declaredTools : undefined,
         files,
       })) {
