@@ -34,7 +34,8 @@ export type AgentTool = {
     description: string;
     parameters: {
       type: "object";
-      properties: Record<string, { type: string; description?: string; enum?: string[] }>;
+      // enum 支持 string / number，与后端 OpenAI function schema 对齐（如 days: [0,1,7,30]）
+      properties: Record<string, { type: string; description?: string; enum?: Array<string | number> }>;
       required?: string[];
     };
   };
@@ -78,26 +79,37 @@ const AKM_GENERATE_IMAGE_TOOL: AgentTool = {
   },
 };
 
-// 图像编辑工具（对应后端内置 akm_edit_image）。读取本地图片（生成工具返回的 local_path
-// 或用户上传时后端落盘的路径）进行编辑，需配置 image_supported_models 对应可用 Key。
+// 图像编辑工具（对应后端内置 akm_edit_image）。图片来源二选一：image_path 读服务器本地文件，
+// 或 image_base64 直接传 base64/data URL（云端无本地文件场景）；需配置 image_supported_models 对应可用 Key。
 const AKM_EDIT_IMAGE_TOOL: AgentTool = {
   type: "function",
   function: {
     name: "akm_edit_image",
-    description: "读取本地图片并编辑（如重绘局部、扩展内容），返回编辑后的图片资源列表。每项含 url，并附带保存到本地的 local_path 与可访问的 http_url（/agent-uploads/...），保存失败时含 save_error。需要提供服务器可访问的图片路径，以及配置了对应模型的可用 API Key",
+    description:
+      "编辑图片（如重绘局部、扩展内容），返回编辑后的图片资源列表。每项含 url，并附带保存到本地的 local_path 与可访问的 http_url（/agent-uploads/...），保存失败时含 save_error。" +
+      "图片来源二选一：image_path 传服务器本地文件绝对路径；或 image_base64 传图片的 base64 数据（可直接使用对话中图片的 data:image/...;base64, 前缀数据，适合本地无文件的场景）。需要配置了对应模型的可用 API Key",
     parameters: {
       type: "object",
       properties: {
-        image_path: { type: "string", description: "本地图片文件的绝对路径" },
+        image_path: { type: "string", description: "本地图片文件的绝对路径，与 image_base64 二选一" },
+        image_base64: {
+          type: "string",
+          description: "图片 base64 数据（可带 data:image/...;base64, 前缀），与 image_path 二选一，优先级更高",
+        },
         prompt: { type: "string", description: "编辑指令，描述期望的修改效果" },
         model: { type: "string", description: "图片编辑模型，默认取 image_supported_models 首项" },
         mask_path: { type: "string", description: "本地蒙版图片路径，用于限定重绘区域，可选" },
+        mask_base64: {
+          type: "string",
+          description: "蒙版图片的 base64 数据（可带 data:... 前缀），与 mask_path 二选一，优先级更高",
+        },
         size: { type: "string", description: "输出图片尺寸，如 1024x1024，可选" },
         quality: { type: "string", description: "生成质量，如 standard 或 hd，可选" },
         output_format: { type: "string", description: "输出格式，如 png 或 jpeg，可选" },
         n: { type: "integer", description: "生成张数，默认 1" },
       },
-      required: ["image_path", "prompt"],
+      // 与后端一致：仅 prompt 必填；图片由 image_path / image_base64 二选一提供
+      required: ["prompt"],
     },
   },
 };
@@ -110,6 +122,30 @@ const AKM_GET_TIME_TOOL: AgentTool = {
     name: "akm_get_time",
     description: "获取服务器当前时间，返回本地 ISO 时间、UTC 时间、UNIX 时间戳与时区",
     parameters: { type: "object", properties: {} },
+  },
+};
+
+// 查询 Token 用量统计（对应后端内置 akm_get_usage_stats，与 /api/stats 同源）。
+// 只读，作为基础工具始终声明；默认返回 1/7/30 天窗口，开启 cost_stats_enabled 时附带费用估算。
+const AKM_GET_USAGE_STATS_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_get_usage_stats",
+    description:
+      "查询 AKM 近期 Token 用量统计。默认同时返回最近 1/7/30 天窗口的请求数、" +
+      "prompt/completion/total/cached tokens，以及按 model/provider/key 的汇总。" +
+      "开启 cost_stats_enabled 时额外返回费用估算（total_cost）与模型单价表" +
+      "（input/input_cache/output，单位 USD per 1M tokens）；费用为本地估算，不能替代供应商账单",
+    parameters: {
+      type: "object",
+      properties: {
+        days: {
+          type: "integer",
+          description: "查询窗口：1 / 7 / 30 只返回该窗口；0 或省略时返回 1、7、30 三个窗口",
+          enum: [0, 1, 7, 30],
+        },
+      },
+    },
   },
 };
 
@@ -194,14 +230,15 @@ const AKM_FILE_INFO_TOOL: AgentTool = {
 };
 
 // 按客户端 UI 工具开关（"search" / "image" / "files"）映射为显式声明的工具定义列表。
-// akm_get_time 作为基础工具始终声明（后端全关时也会默认注入，这里保证开启其它开关时不丢失）；
-// "image" 同时声明生成与编辑，模型可先生成拿到 local_path 再编辑；
+// 基础工具（akm_get_time / akm_get_usage_stats）始终声明，避免白名单注入时丢失；
+// "image" 同时声明生成与编辑，模型可先生成拿到 local_path 再编辑，也可对上传图用 base64 编辑；
 // "files" 只声明只读文件工具（读文件/列目录/glob/grep/文件信息），不声明写文件与 shell。
-// 全关时仍返回空数组（调用方据此不携带 tools 字段，
-// 后端默认不注入联网搜索/图片生成/编辑/写文件/shell 工具）。
+// 因基础工具始终存在，返回列表非空；调用方会携带 tools 走白名单，
+// 后端不会注入未声明的联网搜索/图片生成/编辑/写文件/shell 工具。
 export function resolveDeclaredTools(tools: string[]): AgentTool[] {
   const declared: AgentTool[] = [];
-  declared.push(AKM_GET_TIME_TOOL);
+  // 基础只读工具：始终声明，与后端未传 tools 时的默认注入子集对齐
+  declared.push(AKM_GET_TIME_TOOL, AKM_GET_USAGE_STATS_TOOL);
   if (tools.includes("search")) declared.push(TAVILY_SEARCH_TOOL);
   if (tools.includes("image")) {
     declared.push(AKM_GENERATE_IMAGE_TOOL, AKM_EDIT_IMAGE_TOOL);

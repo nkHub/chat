@@ -122,8 +122,6 @@ type Session = { id: string; title: string; time: string; tools?: string[]; mode
 type ChatModel = {
   key: string;
   label: string;
-  badge: string;
-  badgeVariant: "blue" | "green" | "secondary";
 };
 
 type StoredChatState = {
@@ -207,8 +205,6 @@ function toChatModel(model: ApiModel): ChatModel {
   return {
     key: model.id,
     label: model.id,
-    badge: model.owned_by || "可用",
-    badgeVariant: "secondary",
   };
 }
 
@@ -743,7 +739,7 @@ function ModelSettingsPopover({
       </PopoverTrigger>
       <PopoverContent side="top" align="start" sideOffset={8} className="w-72 p-1.5">
         <div className="max-h-64 space-y-0.5 overflow-y-auto">
-          {modelsLoading ? <p className="px-2 py-3 text-xs text-muted-foreground">正在读取 /v1/models…</p> : models.length ? models.map(item => <button key={item.key} type="button" onClick={() => { onModelChange(item); setOpen(false); }} className="flex w-full items-center justify-between gap-3 rounded-md px-2 py-2 text-left text-xs transition-colors hover:bg-muted"><span className="min-w-0 truncate">{item.label}</span><span className="flex shrink-0 items-center gap-1.5"><Badge variant={item.badgeVariant} className="h-4 max-w-24 truncate px-1.5 py-0 text-xs">{item.badge}</Badge>{model?.key === item.key && <Check size={12} className="text-primary" />}</span></button>) : <div className="px-2 py-3 text-xs text-muted-foreground">{modelsError || "暂无可用模型"}</div>}
+          {modelsLoading ? <p className="px-2 py-3 text-xs text-muted-foreground">正在读取 /v1/models…</p> : models.length ? models.map(item => <button key={item.key} type="button" onClick={() => { onModelChange(item); setOpen(false); }} className="flex w-full items-center justify-between gap-3 rounded-md px-2 py-2 text-left text-xs transition-colors hover:bg-muted"><span className="min-w-0 truncate">{item.label}</span>{model?.key === item.key && <Check size={12} className="shrink-0 text-primary" />}</button>) : <div className="px-2 py-3 text-xs text-muted-foreground">{modelsError || "暂无可用模型"}</div>}
         </div>
         {modelsError && <button type="button" className="mt-1 w-full border-t px-2 pt-2 text-left text-xs text-destructive underline underline-offset-2" onClick={onReloadModels}>重试读取模型</button>}
 
@@ -863,11 +859,19 @@ function ChatPage({
   }, [session?.id]);
 
   // 取最后一条助手消息的内容长度，用于感知流式输出增长。
-  const lastAssistantContent = useMemo(() => {    for (let index = messages.length - 1; index >= 0; index -= 1) {
+  const lastAssistantContent = useMemo(() => {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
       if (messages[index].role === "assistant") return messages[index].content;
     }
     return "";
   }, [messages]);
+
+  // 上一条回复尚未完成（用户消息仍在发送中，或助手消息仍在流式生成）时禁止再发，
+  // 避免并发请求打乱会话顺序与上下文。
+  const isReplyPending = useMemo(
+    () => messages.some(message => message.status === "sending"),
+    [messages],
+  );
 
   // 新消息到达或流式内容增长时，仅在吸附状态下自动滚动到底部；用户上翻阅读历史时不打扰。
   useEffect(() => {
@@ -895,7 +899,8 @@ function ChatPage({
   }, []);
 
   const send = () => {
-    if (!input.trim() && !attachments.length) return;
+    // 回复未完成时不允许再发；空内容同样拦截
+    if (isReplyPending || (!input.trim() && !attachments.length)) return;
     onSend(input.trim() || attachments.map(file => file.name).join(", "), attachments, tools);
     setInput("");
     setAttachments([]);
@@ -911,7 +916,7 @@ function ChatPage({
     </header>
         <ScrollArea viewportRef={viewportRef} className="min-h-0 flex-1 bg-white dark:bg-card">
       <div className="mx-auto max-w-4xl space-y-6 px-4 py-6 sm:px-6">
-        {messages.length === 0 && <EmptyChat onPrompt={prompt => onSend(prompt, [], [])} />}
+        {messages.length === 0 && <EmptyChat onPrompt={prompt => { if (!isReplyPending) onSend(prompt, [], []); }} />}
         {visibleMessages.map((message, messageIndex) => message.role === "assistant" ? (
           <div key={message.id} className="group/msg flex gap-3">
             <Avatar className="mt-0.5 h-7 w-7 shrink-0"><AvatarFallback className="bg-primary text-primary-foreground"><Bot size={13} /></AvatarFallback></Avatar>
@@ -984,17 +989,41 @@ function ChatPage({
       <div className="mx-auto max-w-3xl">
         <div className="overflow-hidden rounded-xl border bg-card shadow-sm transition-all focus-within:border-primary/50 focus-within:ring-1 focus-within:ring-primary/30">
           {attachments.length > 0 && <div className="flex flex-wrap gap-1.5 px-4 pb-1 pt-3">{attachments.map((file, index) => <div key={`${file.name}-${index}`} className="flex max-w-[180px] items-center gap-1.5 rounded-lg border border-border bg-muted px-2.5 py-1 text-xs text-foreground/70"><Paperclip size={11} className="shrink-0 text-muted-foreground" /><span className="truncate">{file.name}</span><button type="button" aria-label={`移除${file.name}`} onClick={() => setAttachments(prev => prev.filter((_, itemIndex) => itemIndex !== index))} className="ml-0.5 shrink-0 text-muted-foreground hover:text-foreground"><X size={12} /></button></div>)}</div>}
-          <textarea ref={textareaRef} value={input} rows={1} placeholder="发送消息… (Shift+Enter 换行)" onChange={event => { setInput(event.target.value); event.target.style.height = "auto"; event.target.style.height = `${Math.min(event.target.scrollHeight, 160)}px`; }} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); send(); } }} className="w-full resize-none bg-transparent px-4 pb-2 pt-3.5 text-sm text-foreground outline-none placeholder:text-muted-foreground" style={{ minHeight: 44, maxHeight: 160 }} />
+          <textarea
+            ref={textareaRef}
+            value={input}
+            rows={1}
+            // 回复进行中时提示用户稍候，避免误以为可以连发
+            placeholder={isReplyPending ? "上一条回复生成中，请稍候…" : "发送消息… (Shift+Enter 换行)"}
+            disabled={isReplyPending}
+            onChange={event => {
+              setInput(event.target.value);
+              event.target.style.height = "auto";
+              event.target.style.height = `${Math.min(event.target.scrollHeight, 160)}px`;
+            }}
+            onKeyDown={event => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                send();
+              }
+            }}
+            className={cn(
+              "w-full resize-none bg-transparent px-4 pb-2 pt-3.5 text-sm text-foreground outline-none placeholder:text-muted-foreground",
+              isReplyPending && "cursor-not-allowed opacity-60",
+            )}
+            style={{ minHeight: 44, maxHeight: 160 }}
+          />
           <div className="flex items-center justify-between px-3 pb-3 pt-1">
             <div className="flex min-w-0 items-center gap-0.5">
               <input ref={fileInputRef} type="file" multiple accept="image/*,.txt" className="hidden" onChange={event => { setAttachments(prev => [...prev, ...Array.from(event.target.files ?? [])]); event.target.value = ""; }} />
-              <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="sm" className="h-7 gap-1.5 text-xs text-muted-foreground hover:text-foreground" onClick={() => fileInputRef.current?.click()}><Paperclip size={13} />附件</Button></TooltipTrigger><TooltipContent>上传文件</TooltipContent></Tooltip>
+              <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="sm" className="h-7 gap-1.5 text-xs text-muted-foreground hover:text-foreground" onClick={() => fileInputRef.current?.click()} disabled={isReplyPending}><Paperclip size={13} />附件</Button></TooltipTrigger><TooltipContent>上传文件</TooltipContent></Tooltip>
               <Separator orientation="vertical" className="mx-1 h-4" />
-              {[{ id: "search", icon: Search, label: "联网搜索" }, { id: "image", icon: ImageIcon, label: "图像生成" }, { id: "files", icon: FileText, label: "读取文件" }].map(({ id, icon: Icon, label }) => <Tooltip key={id}><TooltipTrigger asChild><Button variant={tools.includes(id) ? "secondary" : "ghost"} size="sm" className={cn("h-7 gap-1.5 text-xs", tools.includes(id) ? "text-primary" : "text-muted-foreground hover:text-foreground")} onClick={() => onToolsChange(tools.includes(id) ? tools.filter(item => item !== id) : [...tools, id])}><Icon size={13} /><span className="hidden lg:inline">{label}</span></Button></TooltipTrigger><TooltipContent>{label}</TooltipContent></Tooltip>)}
+              {[{ id: "search", icon: Search, label: "联网搜索" }, { id: "image", icon: ImageIcon, label: "图像生成" }, { id: "files", icon: FileText, label: "读取文件" }].map(({ id, icon: Icon, label }) => <Tooltip key={id}><TooltipTrigger asChild><Button variant={tools.includes(id) ? "secondary" : "ghost"} size="sm" className={cn("h-7 gap-1.5 text-xs", tools.includes(id) ? "text-primary" : "text-muted-foreground hover:text-foreground")} onClick={() => onToolsChange(tools.includes(id) ? tools.filter(item => item !== id) : [...tools, id])} disabled={isReplyPending}><Icon size={13} /><span className="hidden lg:inline">{label}</span></Button></TooltipTrigger><TooltipContent>{label}</TooltipContent></Tooltip>)}
             </div>
             <div className="flex min-w-0 items-center gap-2">
               <ModelSettingsPopover model={model} models={models} modelsLoading={modelsLoading} modelsError={modelsError} onModelChange={onModelChange} onReloadModels={onReloadModels} />
-              <Button size="icon-sm" className="h-7 w-7" onClick={send} disabled={!model || (!input.trim() && !attachments.length)}><Send size={13} /></Button>
+              {/* 回复未完成、无模型、或内容为空时禁用发送按钮 */}
+              <Button size="icon-sm" className="h-7 w-7" onClick={send} disabled={isReplyPending || !model || (!input.trim() && !attachments.length)} title={isReplyPending ? "上一条回复生成中" : undefined}><Send size={13} /></Button>
             </div>
           </div>
         </div>
@@ -1197,7 +1226,12 @@ export default function App() {
     setModelsLoading(true);
     setModelsError(null);
     try {
-      const loadedModels = (await fetchModels()).map(toChatModel);
+      // 过滤掉不能用于聊天的专用模型：reranker（重排序）/ embedding（向量化）/ review（评审），
+      // 其余按名称字母顺序排序。
+      const loadedModels = (await fetchModels())
+        .filter(model => !/(reranker|embedding|review)/i.test(model.id))
+        .map(toChatModel)
+        .sort((a, b) => a.label.localeCompare(b.label, "zh-CN"));
       setModels(loadedModels);
       setSelectedModel(previous => loadedModels.find(model => model.key === (previous?.key || storedState?.selectedModelKey)) || loadedModels[0] || null);
     } catch (error) {
@@ -1367,7 +1401,7 @@ export default function App() {
         ? "\n用户已开启联网搜索，如需最新/实时信息请优先调用 tavily_search 工具获取结果。"
         : "";
       const imageHint = tools.includes("image")
-        ? "\n用户已开启图像生成，如需生成图片请调用 akm_generate_image 工具；生成完成后请把返回的图片 URL 以 Markdown 图片语法 ![图片](url) 写进回复正文，方便用户直接查看。"
+        ? "\n用户已开启图像生成/编辑：生成请调用 akm_generate_image；编辑可用 akm_edit_image（image_path 本地路径，或 image_base64 直接传对话中的 data URL）。生成/编辑完成后请把返回的图片 URL 以 Markdown 图片语法 ![图片](url) 写进回复正文，方便用户直接查看。"
         : "";
       const filesHint = tools.includes("files")
         ? "\n用户已开启工作区文件读取，如需要查看、搜索或了解工作区内的文件（代码/文档等），可调用 akm_read_file / akm_list_dir / akm_glob / akm_grep / akm_file_info 等只读工具获取内容。"
@@ -1502,7 +1536,11 @@ export default function App() {
   };
 
   const sendMessage = (content: string, attachments: File[] = [], tools: string[] = []) => {
+    // 当前会话仍有发送中/生成中的消息时禁止再发，防止并发请求打乱上下文
     const sessionId = activeSession || `new-${Date.now()}`;
+    const existing = allMessages[sessionId] ?? [];
+    if (existing.some(message => message.status === "sending")) return;
+
     const id = `${sessionId}-user-${Date.now()}`;
     const message: Message = {
       id, role: "user", content, time: nowTime(), status: "sending",
@@ -1511,7 +1549,7 @@ export default function App() {
         previewUrl: file.type.startsWith("image/") ? URL.createObjectURL(file) : undefined,
       })) : undefined,
     };
-    const requestHistory = [...(allMessages[sessionId] ?? []), message];
+    const requestHistory = [...existing, message];
     setAllMessages(prev => ({ ...prev, [sessionId]: [...(prev[sessionId] ?? []), message] }));
     setSessions(prev => {
       if (!prev.some(session => session.id === sessionId)) {
@@ -1526,6 +1564,8 @@ export default function App() {
   const retryMessage = (id: string) => {
     const sessionId = activeSession;
     const snapshot = allMessages[sessionId] ?? [];
+    // 回复进行中不允许重试，避免与进行中的请求并发
+    if (snapshot.some(message => message.status === "sending")) return;
     const targetIndex = snapshot.findIndex(message => message.id === id);
     if (targetIndex < 0) return;
 
