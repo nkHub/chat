@@ -1,7 +1,7 @@
 # AetherAI · 对话窗口
 
 AetherAI 的聊天窗口前端（React 18 + Vite + TypeScript + Tailwind CSS 4 + Radix UI），
-对接同级项目 [AKM](https://github.com/anomalyco/ccs)（`/Users/nk/Desktop/Ecology/ccs`）的
+对接同级项目 [AKM](https://github.com/nkHub/akm)（`/Users/nk/Desktop/Ecology/ccs`）的
 `/v1/agent` 接口，提供流式对话、工具调用、会话管理与多主题外观。
 
 ## 快速开始
@@ -79,4 +79,4 @@ src/
 
 ## 相关项目
 
-- [AKM（ccs）](https://github.com/anomalyco/ccs)：后端服务，提供 `/v1/agent`、`/v1/models` 等接口
+- [AKM](https://github.com/nkHub/akm)：后端服务，提供 `/v1/agent`、`/v1/models` 等接口
