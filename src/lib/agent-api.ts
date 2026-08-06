@@ -125,6 +125,70 @@ const AKM_GET_TIME_TOOL: AgentTool = {
   },
 };
 
+// 查询 Key 汇总（对应后端内置 akm_get_keys_summary，无参数）。
+// 只读，作为基础工具始终声明；返回 Key 总数与每个 Key 的供应商/模型清单，不返回密钥。
+const AKM_GET_KEYS_SUMMARY_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_get_keys_summary",
+    description: "返回 AKM 当前已配置 Key 的总数，以及每个 Key 的供应商与模型清单，不返回密钥",
+    parameters: { type: "object", properties: {} },
+  },
+};
+
+// 读取 AKM 运行配置（对应后端内置 akm_get_config，无参数）。
+// 只读，作为基础工具始终声明；密钥类字段（agent_api_token、tavily_api_key）不做明文透出，仅标记是否已配置。
+const AKM_GET_CONFIG_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_get_config",
+    description:
+      "读取 AKM 运行配置。密钥类字段（agent_api_token、tavily_api_key）不做明文透出，" +
+      "仅标记是否已配置；其余配置项原样返回",
+    parameters: { type: "object", properties: {} },
+  },
+};
+
+// 列出已加载插件（对应后端内置 akm_list_plugins，无参数）。
+// 只读，作为基础工具始终声明；返回插件名称、版本、分类、描述、是否内置、是否启用与来源。
+const AKM_LIST_PLUGINS_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_list_plugins",
+    description: "列出 AKM 已加载插件的非敏感摘要：名称、版本、分类、描述、是否内置、是否启用与来源",
+    parameters: { type: "object", properties: {} },
+  },
+};
+
+// 列出历史 Agent 会话（对应后端内置 akm_list_sessions，无参数）。
+// 只读，作为基础工具始终声明；返回会话元信息（会话名、创建/更新时间、消息数、模型），不含消息正文。
+const AKM_LIST_SESSIONS_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_list_sessions",
+    description: "列出历史 Agent 会话的元信息（会话名、创建/更新时间、消息数、模型），不含消息正文，按更新时间倒序",
+    parameters: { type: "object", properties: {} },
+  },
+};
+
+// 读取历史 Agent 会话（对应后端内置 akm_load_session）。
+// 只读，作为基础工具始终声明；读取指定会话最近若干条消息，用于回顾之前会话的上下文。
+const AKM_LOAD_SESSION_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_load_session",
+    description: "读取历史 Agent 会话的最近若干条消息，用于回顾之前会话的上下文",
+    parameters: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "会话名（来自 akm_list_sessions 的 name 字段）" },
+        limit: { type: "integer", description: "返回最近的消息条数，1 到 100，默认 20" },
+      },
+      required: ["name"],
+    },
+  },
+};
+
 // 查询 Token 用量统计（对应后端内置 akm_get_usage_stats，与 /api/stats 同源）。
 // 只读，作为基础工具始终声明；默认返回 1/7/30 天窗口，开启 cost_stats_enabled 时附带费用估算。
 const AKM_GET_USAGE_STATS_TOOL: AgentTool = {
@@ -238,7 +302,15 @@ const AKM_FILE_INFO_TOOL: AgentTool = {
 export function resolveDeclaredTools(tools: string[]): AgentTool[] {
   const declared: AgentTool[] = [];
   // 基础只读工具：始终声明，与后端未传 tools 时的默认注入子集对齐
-  declared.push(AKM_GET_TIME_TOOL, AKM_GET_USAGE_STATS_TOOL);
+  declared.push(
+    AKM_GET_TIME_TOOL,
+    AKM_GET_USAGE_STATS_TOOL,
+    AKM_GET_KEYS_SUMMARY_TOOL,
+    AKM_GET_CONFIG_TOOL,
+    AKM_LIST_PLUGINS_TOOL,
+    AKM_LIST_SESSIONS_TOOL,
+    AKM_LOAD_SESSION_TOOL,
+  );
   if (tools.includes("search")) declared.push(TAVILY_SEARCH_TOOL);
   if (tools.includes("image")) {
     declared.push(AKM_GENERATE_IMAGE_TOOL, AKM_EDIT_IMAGE_TOOL);

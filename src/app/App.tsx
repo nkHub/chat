@@ -57,7 +57,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import { fetchModels, runAgentStream, resolveDeclaredTools, type AgentMessage, type ApiModel, type ContextWarning } from "@/lib/agent-api";
+import { fetchModels, runAgent, runAgentStream, resolveDeclaredTools, type AgentMessage, type ApiModel, type ContextWarning } from "@/lib/agent-api";
 
 type ThemePreset = {
   key: string;
@@ -117,7 +117,7 @@ type Message = {
   compacted?: number;
 };
 
-type Session = { id: string; title: string; time: string; tools?: string[]; modelKey?: string; instructions?: string };
+type Session = { id: string; title: string; time: string; tools?: string[]; modelKey?: string; instructions?: string; autoTitled?: boolean };
 
 type ChatModel = {
   key: string;
@@ -138,6 +138,10 @@ const THEME_MODE_KEY = "aether-ai-theme-mode";
 // 主题色独立持久化：key 对应 THEMES 中的 theme.key，读取失败/非法时回退到默认蓝色。
 const THEME_KEY = "aether-ai-theme-key";
 const AGENT_INSTRUCTIONS = "你是 AetherAI 内置助手，请用中文回复，回答要清晰、准确、可执行。";
+
+// 是否启用「自动生成会话标题」：会话消息每满 10 条时用 /v1/agent 生成一次标题。
+// 默认关闭（false），避免每次会话额外消耗一次模型请求；改为 true 可开启。
+const AUTO_TITLE_ENABLED = false;
 
 const THEME_MODES: { key: ThemeMode; label: string; icon: LucideIcon }[] = [
   { key: "system", label: "跟随系统", icon: Monitor },
@@ -601,6 +605,7 @@ function Sidebar({
   onSaveEdit,
   onCloseEdit,
   onDeleteSession,
+  onReorderSessions,
   activeTheme,
   onThemeChange,
   themeMode,
@@ -619,6 +624,7 @@ function Sidebar({
   onSaveEdit: (id: string, title: string) => void;
   onCloseEdit: () => void;
   onDeleteSession: (id: string) => void;
+  onReorderSessions: (fromId: string, toId: string) => void;
   activeTheme: string;
   onThemeChange: (theme: ThemePreset) => void;
   themeMode: ThemeMode;
@@ -626,6 +632,8 @@ function Sidebar({
   onClose: () => void;
 }) {
   const [editValue, setEditValue] = useState("");
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [overId, setOverId] = useState<string | null>(null);
   const links = [
     { icon: MessageSquare, label: "对话", page: "chat", plus: true },
     { icon: Cpu, label: "助手", page: "assistant", plus: false },
@@ -653,7 +661,24 @@ function Sidebar({
             {sessions.map(session => (
               <ContextMenu key={session.id}>
                 <ContextMenuTrigger asChild>
-                  <div onClick={() => onSessionChange(session.id)} className={cn("mb-0.5 flex w-full cursor-pointer select-none items-center gap-1 rounded-md px-2.5 py-2 text-left transition-colors", session.id === activeSession ? "bg-primary/10 text-primary" : "text-foreground/55 hover:bg-black/[0.05] hover:text-foreground/80 dark:hover:bg-white/10 dark:hover:text-foreground")}>
+                  <div
+                    draggable
+                    onDragStart={() => setDragId(session.id)}
+                    onDragOver={event => {
+                      event.preventDefault();
+                      if (dragId && dragId !== session.id && overId !== session.id) setOverId(session.id);
+                    }}
+                    onDragLeave={() => { if (overId === session.id) setOverId(null); }}
+                    onDrop={event => {
+                      event.preventDefault();
+                      if (dragId && dragId !== session.id) onReorderSessions(dragId, session.id);
+                      setDragId(null);
+                      setOverId(null);
+                    }}
+                    onDragEnd={() => { setDragId(null); setOverId(null); }}
+                    onClick={() => onSessionChange(session.id)}
+                    className={cn("mb-0.5 flex w-full cursor-pointer select-none items-center gap-1 rounded-md px-2.5 py-2 text-left transition-colors", dragId === session.id && "opacity-40", overId === session.id && "outline-2 outline-dashed outline-primary", session.id === activeSession ? "bg-primary/10 text-primary" : "text-foreground/55 hover:bg-black/[0.05] hover:text-foreground/80 dark:hover:bg-white/10 dark:hover:text-foreground")}
+                  >
                     <span className="min-w-0 flex-1 truncate text-sm leading-snug">{session.title}</span>
                     <span className="shrink-0 whitespace-nowrap text-xs text-foreground/30">{formatDisplayTime(session.time)}</span>
                   </div>
@@ -1300,10 +1325,43 @@ export default function App() {
 
   const newSession = () => {
     const id = `new-${Date.now()}`;
-    setSessions(prev => [{ id, title: "新对话", time: nowTime() }, ...prev]);
+    setSessions(prev => [{ id, title: "新对话", time: nowTime(), autoTitled: false }, ...prev]);
     setAllMessages(prev => ({ ...prev, [id]: [] }));
     setActiveSession(id);
     setActivePage("chat");
+  };
+
+  // 根据会话历史生成简短标题（复用 /v1/agent 非流式接口）。
+  // 仅在标题仍是自动生成的初始标题（autoTitled 为 true）且成功时覆盖，
+  // 用户手动改过的标题不被覆盖。
+  const generateSessionTitle = async (sessionId: string) => {
+    const target = sessions.find(session => session.id === sessionId);
+    if (!target?.autoTitled) return;
+    const modelKey = selectedModel?.key;
+    if (!modelKey) return;
+    const history = (allMessages[sessionId] ?? []).filter(message => message.role === "user" || message.role === "assistant");
+    if (history.length < 2) return;
+    try {
+      const payload = await runAgent({
+        model: modelKey,
+        messages: history.slice(-8).map(message => ({ role: message.role, content: messageText(message) })),
+        instructions: "请用不超过 15 个汉字概括这段对话的主题，直接输出标题文本，不要引号、不要解释、不要前缀。",
+      });
+      const raw = extractTextContent(payload?.final_message?.content).trim();
+      const title = raw.replace(/^["“”「」]+|["“”「」]+$/g, "").trim().slice(0, 30);
+      if (title) {
+        setSessions(prev => prev.map(session => session.id === sessionId ? { ...session, title } : session));
+      }
+    } catch {
+      // 标题生成失败时静默保留原标题，不打断用户。
+    }
+  };
+
+  // 会话消息累计到 10 / 20 / 30…（每满 10 条）时触发一次标题自动生成。
+  // AUTO_TITLE_ENABLED 默认关闭；开启后才消耗一次 /v1/agent 请求用于生成标题。
+  const maybeAutoTitle = (sessionId: string, messageCount: number) => {
+    if (!AUTO_TITLE_ENABLED) return;
+    if (messageCount >= 10 && messageCount % 10 === 0) void generateSessionTitle(sessionId);
   };
 
   const requestAgent = async (sessionId: string, userMessageId: string, assistantMessageId: string, requestHistory: Message[], files: File[] = [], tools: string[] = []) => {
@@ -1519,6 +1577,8 @@ export default function App() {
       if (segments.length) updateAssistant({ segments: segments.slice() });
 
       if (!completed) throw new Error("Agent 未返回最终消息");
+      // 回复成功后按累计消息数触发标题自动生成（每满 10 条一次）。
+      maybeAutoTitle(sessionId, requestHistory.length + 1);
     } catch (error) {
       // 出错时同样冲刷残留增量，尽量保留已输出的内容。
       finalizeStream();
@@ -1553,9 +1613,9 @@ export default function App() {
     setAllMessages(prev => ({ ...prev, [sessionId]: [...(prev[sessionId] ?? []), message] }));
     setSessions(prev => {
       if (!prev.some(session => session.id === sessionId)) {
-        return [{ id: sessionId, title: content.slice(0, 22), time: nowTime() }, ...prev];
+        return [{ id: sessionId, title: content.slice(0, 22), time: nowTime(), autoTitled: true }, ...prev];
       }
-      return prev.map(session => session.id === sessionId && session.title === "新对话" ? { ...session, title: content.slice(0, 22) } : session);
+      return prev.map(session => session.id === sessionId && session.title === "新对话" ? { ...session, title: content.slice(0, 22), autoTitled: true } : session);
     });
     if (!activeSession) setActiveSession(sessionId);
     void requestAgent(sessionId, id, `${sessionId}-assistant-${Date.now()}`, requestHistory, attachments, tools);
@@ -1590,8 +1650,20 @@ export default function App() {
     void requestAgent(sessionId, userMessage.id, assistantMessageId, requestHistory, [], sessionTools);
   };
   const startEdit = (id: string) => setEditingId(id);
-  const saveEdit = (id: string, title: string) => { const value = title.trim(); if (value) setSessions(prev => prev.map(session => session.id === id ? { ...session, title: value } : session)); setEditingId(null); };
+  const saveEdit = (id: string, title: string) => { const value = title.trim(); if (value) setSessions(prev => prev.map(session => session.id === id ? { ...session, title: value, autoTitled: false } : session)); setEditingId(null); };
   const deleteSession = (id: string) => { setSessions(prev => prev.filter(session => session.id !== id)); setAllMessages(prev => { const next = { ...prev }; delete next[id]; return next; }); if (id === activeSession) { const next = sessions.find(session => session.id !== id); setActiveSession(next?.id ?? ""); } };
+
+  const reorderSessions = (fromId: string, toId: string) => {
+    setSessions(prev => {
+      const fromIndex = prev.findIndex(session => session.id === fromId);
+      const toIndex = prev.findIndex(session => session.id === toId);
+      if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return prev;
+      const next = [...prev];
+      const [moved] = next.splice(fromIndex, 1);
+      next.splice(toIndex, 0, moved);
+      return next;
+    });
+  };
   const changeTheme = (theme: ThemePreset) => { setActiveTheme(theme.key); applyTheme(theme, document.documentElement.classList.contains("dark")); };
   const changeThemeMode = (mode: ThemeMode) => setThemeMode(mode);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
@@ -1619,7 +1691,7 @@ export default function App() {
 
   return (
     <PreviewContext.Provider value={{ openPreview: setPreviewUrl }}>
-      <TooltipProvider delayDuration={400}><div className="flex h-screen w-full overflow-hidden bg-background" style={{ fontFamily: "Inter, system-ui, sans-serif" }}><Sidebar open={sidebarOpen} activePage={activePage} sessions={displaySessions} activeSession={activeSession} editingId={editingId} onPageChange={setActivePage} onNewSession={newSession} onSessionChange={id => { setActiveSession(id); setActivePage("chat"); const target = sessions.find(session => session.id === id); if (target?.modelKey) { const savedModel = models.find(model => model.key === target.modelKey); if (savedModel) setSelectedModel(savedModel); } }} onStartEdit={startEdit} onSaveEdit={saveEdit} onCloseEdit={() => setEditingId(null)} onDeleteSession={id => setDeleteSessionTarget(sessions.find(session => session.id === id) ?? null)} activeTheme={activeTheme} onThemeChange={changeTheme} themeMode={themeMode} onThemeModeChange={changeThemeMode} onClose={() => setSidebarOpen(false)} /><main className="flex min-w-0 flex-1 flex-col overflow-hidden">{content}</main></div></TooltipProvider>
+      <TooltipProvider delayDuration={400}><div className="flex h-screen w-full overflow-hidden bg-background" style={{ fontFamily: "Inter, system-ui, sans-serif" }}><Sidebar open={sidebarOpen} activePage={activePage} sessions={displaySessions} activeSession={activeSession} editingId={editingId} onPageChange={setActivePage} onNewSession={newSession} onSessionChange={id => { setActiveSession(id); setActivePage("chat"); const target = sessions.find(session => session.id === id); if (target?.modelKey) { const savedModel = models.find(model => model.key === target.modelKey); if (savedModel) setSelectedModel(savedModel); } }} onStartEdit={startEdit} onSaveEdit={saveEdit} onCloseEdit={() => setEditingId(null)} onDeleteSession={id => setDeleteSessionTarget(sessions.find(session => session.id === id) ?? null)} onReorderSessions={reorderSessions} activeTheme={activeTheme} onThemeChange={changeTheme} themeMode={themeMode} onThemeModeChange={changeThemeMode} onClose={() => setSidebarOpen(false)} /><main className="flex min-w-0 flex-1 flex-col overflow-hidden">{content}</main></div></TooltipProvider>
       <Dialog open={deleteSessionTarget !== null} onOpenChange={open => { if (!open) closeDeleteSessionDialog(); }}>
         <DialogContent>
           <DialogHeader>
