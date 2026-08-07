@@ -1134,18 +1134,18 @@ function AssistantPage({ sidebarOpen, onToggle, onStart, assistants, onAdd, onEd
             {assistants.map(assistant => {
               const { id, name: assistantName, description, icon: Icon, color } = assistant;
               return (
-                <div key={id} className="group relative rounded-xl border bg-card p-4 shadow-sm transition-all hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-md">
+                <div key={id} className="group relative flex flex-col rounded-xl border bg-card p-4 shadow-sm transition-all hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-md">
                   <div className="absolute right-2 top-2 flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
                     <button type="button" onClick={event => { event.stopPropagation(); openEdit(assistant); }} className="rounded p-1 text-foreground/25 hover:bg-black/[0.06] hover:text-foreground focus:outline-none dark:hover:bg-white/10" title="编辑助手"><Pencil size={14} /></button>
                     <button type="button" onClick={event => { event.stopPropagation(); setDeleteTarget(assistant); }} className="rounded p-1 text-foreground/25 hover:bg-black/[0.06] hover:text-red-500 focus:outline-none dark:hover:bg-white/10" title="删除助手"><Trash2 size={14} /></button>
                   </div>
-                  <button type="button" onClick={() => onStart(id)} className="w-full text-left">
+                  <button type="button" onClick={() => onStart(id)} className="flex w-full flex-1 flex-col text-left">
                     <div className="mb-3 flex items-center gap-2">
                       <div className={cn("flex h-9 w-9 shrink-0 items-center justify-center rounded-lg", color)}><Icon size={17} /></div>
                       <h3 className="min-w-0 flex-1 truncate text-sm font-semibold">{assistantName}</h3>
                     </div>
-                    <p className="mt-1.5 min-h-10 text-xs leading-relaxed text-muted-foreground">{description}</p>
-                    <div className="mt-5 flex items-center gap-1 text-xs font-medium text-primary opacity-70 transition-opacity group-hover:opacity-100">开始使用<ArrowRight size={12} /></div>
+                    <p className="line-clamp-2 text-xs leading-relaxed text-muted-foreground">{description}</p>
+                    <div className="mt-auto flex items-center gap-1 pt-5 text-xs font-medium text-primary opacity-70 transition-opacity group-hover:opacity-100">开始使用<ArrowRight size={12} /></div>
                   </button>
                 </div>
               );
@@ -1198,7 +1198,13 @@ export default function App() {
     if (!stored) return DEFAULT_ASSISTANTS;
     return stored.map(storedAssistant => {
       const builtin = DEFAULT_ASSISTANTS.find(assistant => assistant.id === storedAssistant.id);
-      return builtin ? { ...builtin, ...storedAssistant } : { ...storedAssistant, icon: Bot, color: "bg-primary/10 text-primary" };
+      if (builtin) return { ...builtin, ...storedAssistant };
+      // 自定义助手：早期版本 description 是占位文案，迁移为直接显示提示词。
+      const migrated = { ...storedAssistant, icon: Bot, color: "bg-primary/10 text-primary" };
+      if (migrated.prompt && migrated.description === "自定义助手 · 使用你设定的提示词工作。") {
+        migrated.description = migrated.prompt;
+      }
+      return migrated;
     });
   });
   const initialSessions = Array.isArray(storedState?.sessions) ? storedState.sessions : [];
@@ -1681,7 +1687,7 @@ export default function App() {
   const content = useMemo(() => {
     if (activePage === "automation") return <AutomationPage sidebarOpen={sidebarOpen} onToggle={() => setSidebarOpen(value => !value)} />;
     if (activePage === "workflow") return <WorkflowPage sidebarOpen={sidebarOpen} onToggle={() => setSidebarOpen(value => !value)} />;
-    if (activePage === "assistant") return <AssistantPage sidebarOpen={sidebarOpen} onToggle={() => setSidebarOpen(value => !value)} assistants={assistants} onAdd={(name, prompt) => setAssistants(prev => [{ id: `custom-${Date.now()}`, name, description: "自定义助手 · 使用你设定的提示词工作。", prompt, icon: Bot, color: "bg-primary/10 text-primary" }, ...prev])} onEdit={(id, name, prompt) => setAssistants(prev => prev.map(assistant => assistant.id === id ? { ...assistant, name, ...(prompt ? { prompt } : {}) } : assistant))} onStart={assistantId => { const assistant = assistants.find(candidate => candidate.id === assistantId); const assistantName = assistant?.name ?? "助手"; const sessionId = `${assistantId}-${Date.now()}`; const message: Message = { id: `${assistantId}-message`, role: "user", content: `你好，请以「${assistantName}」的身份来帮我。`, time: nowTime(), status: "success" }; setSessions(prev => [{ id: sessionId, title: assistantName, time: nowTime(), ...(assistant?.prompt ? { instructions: assistant.prompt } : {}) }, ...prev]); setAllMessages(prev => ({ ...prev, [sessionId]: [message] })); setActiveSession(sessionId); setActivePage("chat"); }} onDelete={assistantId => setAssistants(prev => prev.filter(assistant => assistant.id !== assistantId))} />;
+    if (activePage === "assistant") return <AssistantPage sidebarOpen={sidebarOpen} onToggle={() => setSidebarOpen(value => !value)} assistants={assistants} onAdd={(name, prompt) => setAssistants(prev => [{ id: `custom-${Date.now()}`, name, description: prompt, prompt, icon: Bot, color: "bg-primary/10 text-primary" }, ...prev])} onEdit={(id, name, prompt) => setAssistants(prev => prev.map(assistant => assistant.id === id ? { ...assistant, name, ...(prompt ? { prompt, description: prompt } : {}) } : assistant))} onStart={assistantId => { const assistant = assistants.find(candidate => candidate.id === assistantId); const assistantName = assistant?.name ?? "助手"; const sessionId = `${assistantId}-${Date.now()}`; const message: Message = { id: `${assistantId}-message`, role: "user", content: `你好，请以「${assistantName}」的身份来帮我。`, time: nowTime(), status: "success" }; setSessions(prev => [{ id: sessionId, title: assistantName, time: nowTime(), ...(assistant?.prompt ? { instructions: assistant.prompt } : {}) }, ...prev]); setAllMessages(prev => ({ ...prev, [sessionId]: [message] })); setActiveSession(sessionId); setActivePage("chat"); }} onDelete={assistantId => setAssistants(prev => prev.filter(assistant => assistant.id !== assistantId))} />;
     return <ChatPage session={activeSessionData} messages={messages} model={selectedModel} models={models} modelsLoading={modelsLoading} modelsError={modelsError} sidebarOpen={sidebarOpen} onToggleSidebar={() => setSidebarOpen(value => !value)} onModelChange={model => { setSelectedModel(model); if (activeSession) setSessions(prev => prev.map(session => session.id === activeSession ? { ...session, modelKey: model.key } : session)); }} onReloadModels={() => { void loadModels(); }}     onSend={(contentValue, attachments, tools) => sendMessage(contentValue, attachments, tools)} onRetry={retryMessage} tools={activeSessionData?.tools ?? []} onToolsChange={tools => { if (!activeSession) return; setSessions(prev => prev.map(session => session.id === activeSession ? { ...session, tools } : session)); }} />;
   }, [activePage, activeSessionData, allMessages, messages, models, modelsLoading, modelsError, selectedModel, sidebarOpen, assistants]);
 

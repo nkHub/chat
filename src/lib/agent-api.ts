@@ -357,39 +357,38 @@ const AKM_MAKE_DIR_TOOL: AgentTool = {
 };
 
 // 删除文件工具（对应后端内置 akm_delete_file，需 agent_write_tools_enabled=true）。
-// 删除工作区内的文件，或（recursive=true 时）目录。
+// 仅允许删除单个文件，禁止删除目录（防批量删除）。
 const AKM_DELETE_FILE_TOOL: AgentTool = {
   type: "function",
   function: {
     name: "akm_delete_file",
-    description: "删除工作区内的文件，或（recursive=true 时）目录。仅 agent_write_tools_enabled=true 时可用",
+    description: "删除工作区内的单个文件。禁止删除目录（防批量删除）。仅 agent_write_tools_enabled=true 时可用",
     parameters: {
       type: "object",
       properties: {
-        path: { type: "string", description: "工作区内的文件或目录路径" },
-        recursive: { type: "boolean", description: "删除目录时需设为 true" },
+        path: { type: "string", description: "工作区内要删除的单个文件路径" },
       },
       required: ["path"],
     },
   },
 };
 
-// Shell 任务执行工具（对应后端内置 akm_run_shell，需 agent_run_shell_enabled=true）。
-// 模型只能执行配置中预定义的任务名，不能拼接任意 shell 命令。
+// Shell 执行工具（对应后端内置 akm_run_shell，需 agent_run_shell_enabled=true）。
+// 命令由模型直接传入，服务端用系统 shell 解释执行（支持管道、通配符、重定向），cwd 为工作区根目录。
 const AKM_RUN_SHELL_TOOL: AgentTool = {
   type: "function",
   function: {
     name: "akm_run_shell",
     description:
-      "执行管理员预定义的工作区任务并返回 stdout+stderr。仅 agent_run_shell_enabled=true 时可用；" +
-      "模型只能从已配置任务中选择，不能传入任意 shell 命令",
+      "在工作区用 shell 执行命令字符串并返回 stdout+stderr（支持管道、通配符、重定向；cwd 固定为工作区根目录）。" +
+      "仅 agent_run_shell_enabled=true 时可用；属主机级进程执行能力",
     parameters: {
       type: "object",
       properties: {
-        task: { type: "string", description: "管理员配置的任务名" },
+        command: { type: "string", description: "要执行的 shell 命令字符串" },
         timeout: { type: "integer", description: "超时秒数，1-300，默认 60" },
       },
-      required: ["task"],
+      required: ["command"],
     },
   },
 };
