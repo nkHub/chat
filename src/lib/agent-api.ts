@@ -357,16 +357,17 @@ const AKM_MAKE_DIR_TOOL: AgentTool = {
 };
 
 // 删除文件工具（对应后端内置 akm_delete_file，需 agent_write_tools_enabled=true）。
-// 仅允许删除单个文件，禁止删除目录（防批量删除）。
+// recursive=false（默认）只删除单个文件；recursive=true 可删除目录并递归清除其中所有内容。
 const AKM_DELETE_FILE_TOOL: AgentTool = {
   type: "function",
   function: {
     name: "akm_delete_file",
-    description: "删除工作区内的单个文件。禁止删除目录（防批量删除）。仅 agent_write_tools_enabled=true 时可用",
+    description: "删除工作区内的文件或目录。recursive=false（默认）只删除单个文件；recursive=true 可删除目录并递归清除其中所有内容。禁止删除工作区根目录。仅 agent_write_tools_enabled=true 时可用",
     parameters: {
       type: "object",
       properties: {
-        path: { type: "string", description: "工作区内要删除的单个文件路径" },
+        path: { type: "string", description: "工作区内要删除的文件或目录路径" },
+        recursive: { type: "boolean", description: "是否递归删除目录（含其中所有文件），默认 false" },
       },
       required: ["path"],
     },
@@ -389,6 +390,38 @@ const AKM_RUN_SHELL_TOOL: AgentTool = {
         timeout: { type: "integer", description: "超时秒数，1-300，默认 60" },
       },
       required: ["command"],
+    },
+  },
+};
+
+// 创建/修改 xlsx 电子表格工具（对应后端内置 akm_xlsx，需 agent_write_tools_enabled=true）。
+// action=create 用二维数组或 {工作表名: 二维数组} 新建；action=edit 用 updates=[{sheet, cell, value}] 写入已有文件单元格。
+const AKM_XLSX_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_xlsx",
+    description:
+      "创建或修改工作区内的 .xlsx 电子表格文件。action=create 新建（data 为二维数组或 {sheet名: 二维数组}，目标已存在时需 overwrite=true）；" +
+      "action=edit 修改已有文件（updates 为 [{sheet, cell, value}] 单元格写入列表）。两种 action 共用可选自定义参数：styles 设置单元格字体/背景/对齐/数字格式，" +
+      "column_widths / row_heights 设列宽行高，merge_cells 合并单元格，freeze_panes 冻结窗格，charts 添加柱状/折线/饼图等图表；value 以 = 开头按公式写入。" +
+      "仅 agent_write_tools_enabled=true 时可用",
+    parameters: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["create", "edit"], description: "create 新建 / edit 修改" },
+        path: { type: "string", description: "工作区内的 .xlsx 文件路径" },
+        data: { type: "object", description: "create 用：二维数组（[[...],[...]]）或 {sheet名: 二维数组} 映射" },
+        sheet: { type: "string", description: "create 时纯数组数据写入的工作表名，默认 Sheet1" },
+        overwrite: { type: "boolean", description: "create 时目标已存在是否覆盖，默认 false" },
+        updates: { type: "array", items: { type: "object" }, description: "edit 用：[{sheet, cell, value}] 单元格写入列表，cell 如 A1；value 以 = 开头写公式" },
+        styles: { type: "array", items: { type: "object" }, description: "单元格样式：[{sheet?, cell, bold?, italic?, size?, color?, fill?, align?, number_format?}]，color/fill 为十六进制色值（如 FF0000）" },
+        column_widths: { type: "object", description: "列宽：{sheet?: {列名: 宽度}}，如 {\"Sheet1\": {\"A\": 20}}，sheet 键可省略默认 Sheet1" },
+        row_heights: { type: "object", description: "行高：{sheet?: {行号: 高度}}" },
+        merge_cells: { type: "object", description: "合并单元格：{sheet?: [区间...]}，如 {\"Sheet1\": [\"A1:C1\"]}" },
+        freeze_panes: { type: "object", description: "冻结窗格：{sheet?: \"A2\"}" },
+        charts: { type: "array", items: { type: "object" }, description: "图表列表：[{sheet?, type, title?, data_range, categories_range?, x_title?, y_title?, anchor?, legend?}]，type 为 bar/line/pie/scatter/area/doughnut，data_range 如 B2:B6" },
+      },
+      required: ["action", "path"],
     },
   },
 };
@@ -446,6 +479,7 @@ export function resolveDeclaredTools(tools: string[]): AgentTool[] {
     AKM_EDIT_FILE_TOOL,
     AKM_MAKE_DIR_TOOL,
     AKM_DELETE_FILE_TOOL,
+    AKM_XLSX_TOOL,
   );
   // shell 与 git：始终声明，可用性由后端配置开关控制
   declared.push(AKM_RUN_SHELL_TOOL, AKM_RUN_GIT_TOOL);
