@@ -35,7 +35,7 @@ export type AgentTool = {
     parameters: {
       type: "object";
       // enum 支持 string / number，与后端 OpenAI function schema 对齐（如 days: [0,1,7,30]）
-      properties: Record<string, { type: string; description?: string; enum?: Array<string | number> }>;
+      properties: Record<string, { type: string; description?: string; enum?: Array<string | number>; items?: { type: string } }>;
       required?: string[];
     };
   };
@@ -293,12 +293,137 @@ const AKM_FILE_INFO_TOOL: AgentTool = {
   },
 };
 
-// 按客户端 UI 工具开关（"search" / "image" / "files"）映射为显式声明的工具定义列表。
-// 基础工具（akm_get_time / akm_get_usage_stats）始终声明，避免白名单注入时丢失；
-// "image" 同时声明生成与编辑，模型可先生成拿到 local_path 再编辑，也可对上传图用 base64 编辑；
-// "files" 只声明只读文件工具（读文件/列目录/glob/grep/文件信息），不声明写文件与 shell。
+// 写文件工具（对应后端内置 akm_write_file，需配置 agent_workspace_root 与 agent_write_tools_enabled=true）。
+// 新建或覆盖工作区内的文本文件，支持覆盖 / 追加两种模式。
+const AKM_WRITE_FILE_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_write_file",
+    description:
+      "新建或覆盖工作区内的文本文件（mode=overwrite 覆盖 / append 追加）。" +
+      "仅 agent_write_tools_enabled=true 时可用",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "工作区内的文件路径（相对工作区根目录的路径）" },
+        content: { type: "string", description: "要写入的文本内容" },
+        mode: { type: "string", enum: ["overwrite", "append"], description: "overwrite 覆盖（默认）或 append 追加" },
+      },
+      required: ["path", "content"],
+    },
+  },
+};
+
+// 结构化编辑文件工具（对应后端内置 akm_edit_file，需 agent_write_tools_enabled=true）。
+// 支持行号模式（start_line/end_line + new_content）与内容模式（old_string/new_string）。
+const AKM_EDIT_FILE_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_edit_file",
+    description:
+      "结构化编辑工作区内的文本文件，支持两种定位方式：行号模式传 start_line（1-based，可配 end_line）" +
+      "把行区间替换为 new_content，推荐先读文件拿到行号后用，另可配 old_string 做锚点校验防止改错位置；" +
+      "内容模式将 old_string 替换为 new_string。仅 agent_write_tools_enabled=true 时可用",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "工作区内的文件路径" },
+        old_string: { type: "string", description: "行号模式下作为目标行区间的锚点校验内容（可选）；内容模式下为要被替换的原文片段" },
+        new_string: { type: "string", description: "内容模式下的替换文本，可留空表示删除（仅内容模式使用）" },
+        replace_all: { type: "boolean", description: "内容模式下是否替换所有匹配（默认只替换第一处）" },
+        start_line: { type: "integer", description: "行号模式起始行号（1-based）；传此字段进入行号模式，把 [start_line, end_line] 区间整体替换为 new_content" },
+        end_line: { type: "integer", description: "行号模式结束行号（含，默认等于 start_line，只替换一行）" },
+        new_content: { type: "string", description: "行号模式下的新内容（可多行），替换目标行区间" },
+      },
+      required: ["path"],
+    },
+  },
+};
+
+// 创建目录工具（对应后端内置 akm_make_dir，需 agent_write_tools_enabled=true）。
+const AKM_MAKE_DIR_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_make_dir",
+    description: "在工作区内创建目录（含所需父目录）。仅 agent_write_tools_enabled=true 时可用",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "工作区内的目录路径" },
+      },
+      required: ["path"],
+    },
+  },
+};
+
+// 删除文件工具（对应后端内置 akm_delete_file，需 agent_write_tools_enabled=true）。
+// 删除工作区内的文件，或（recursive=true 时）目录。
+const AKM_DELETE_FILE_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_delete_file",
+    description: "删除工作区内的文件，或（recursive=true 时）目录。仅 agent_write_tools_enabled=true 时可用",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "工作区内的文件或目录路径" },
+        recursive: { type: "boolean", description: "删除目录时需设为 true" },
+      },
+      required: ["path"],
+    },
+  },
+};
+
+// Shell 任务执行工具（对应后端内置 akm_run_shell，需 agent_run_shell_enabled=true）。
+// 模型只能执行配置中预定义的任务名，不能拼接任意 shell 命令。
+const AKM_RUN_SHELL_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_run_shell",
+    description:
+      "执行管理员预定义的工作区任务并返回 stdout+stderr。仅 agent_run_shell_enabled=true 时可用；" +
+      "模型只能从已配置任务中选择，不能传入任意 shell 命令",
+    parameters: {
+      type: "object",
+      properties: {
+        task: { type: "string", description: "管理员配置的任务名" },
+        timeout: { type: "integer", description: "超时秒数，1-300，默认 60" },
+      },
+      required: ["task"],
+    },
+  },
+};
+
+// Git 结构化操作工具（对应后端内置 akm_run_git，需 agent_git_enabled=true）。
+// 仅支持固定集合的结构化操作，不接受自由命令字符串。
+const AKM_RUN_GIT_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_run_git",
+    description:
+      "在工作区执行结构化 git 操作并返回输出与退出码。仅支持 status、diff、log、show、add、restore、reset、commit、branch；" +
+      "不接受自由命令字符串。仅 agent_git_enabled=true 时可用",
+    parameters: {
+      type: "object",
+      properties: {
+        operation: { type: "string", enum: ["status", "diff", "log", "show", "add", "restore", "reset", "commit", "branch"], description: "要执行的 git 操作" },
+        paths: { type: "array", items: { type: "string" }, description: "add、restore、reset 必填；diff 可选的工作区相对路径" },
+        message: { type: "string", description: "commit 操作必填的提交说明" },
+        revision: { type: "string", description: "show 操作的 revision，默认 HEAD" },
+        staged: { type: "boolean", description: "diff 是否查看暂存区，默认 false" },
+        limit: { type: "integer", description: "log 返回条数，1-100，默认 20" },
+        timeout: { type: "integer", description: "超时秒数，1-300，默认 60" },
+      },
+      required: ["operation"],
+    },
+  },
+};
+
+// 按客户端 UI 工具开关（"search" / "image"）映射为显式声明的工具定义列表。
+// 工作区文件工具（读/写/编辑/目录/删除）、git 与 shell 工具始终声明，避免白名单注入时丢失；
+// "image" 同时声明生成与编辑，模型可先生成拿到 local_path 再编辑，也可对上传图用 base64 编辑。
 // 因基础工具始终存在，返回列表非空；调用方会携带 tools 走白名单，
-// 后端不会注入未声明的联网搜索/图片生成/编辑/写文件/shell 工具。
+// 后端不会注入未声明的联网搜索/图片生成/编辑工具。
 export function resolveDeclaredTools(tools: string[]): AgentTool[] {
   const declared: AgentTool[] = [];
   // 基础只读工具：始终声明，与后端未传 tools 时的默认注入子集对齐
@@ -311,12 +436,23 @@ export function resolveDeclaredTools(tools: string[]): AgentTool[] {
     AKM_LIST_SESSIONS_TOOL,
     AKM_LOAD_SESSION_TOOL,
   );
+  // 工作区文件工具（读 + 写）：始终声明，可用性由后端配置开关控制
+  declared.push(
+    AKM_READ_FILE_TOOL,
+    AKM_LIST_DIR_TOOL,
+    AKM_GLOB_TOOL,
+    AKM_GREP_TOOL,
+    AKM_FILE_INFO_TOOL,
+    AKM_WRITE_FILE_TOOL,
+    AKM_EDIT_FILE_TOOL,
+    AKM_MAKE_DIR_TOOL,
+    AKM_DELETE_FILE_TOOL,
+  );
+  // shell 与 git：始终声明，可用性由后端配置开关控制
+  declared.push(AKM_RUN_SHELL_TOOL, AKM_RUN_GIT_TOOL);
   if (tools.includes("search")) declared.push(TAVILY_SEARCH_TOOL);
   if (tools.includes("image")) {
     declared.push(AKM_GENERATE_IMAGE_TOOL, AKM_EDIT_IMAGE_TOOL);
-  }
-  if (tools.includes("files")) {
-    declared.push(AKM_READ_FILE_TOOL, AKM_LIST_DIR_TOOL, AKM_GLOB_TOOL, AKM_GREP_TOOL, AKM_FILE_INFO_TOOL);
   }
   return declared;
 }
