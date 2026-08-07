@@ -35,7 +35,8 @@ npm run preview
 
 ### 会话管理
 - 新建 / 切换 / 重命名 / 删除会话，侧栏直接拖拽排序
-- 会话数据持久化到 `localStorage`（`aether-ai-chat-state`），刷新不丢失
+- 会话数据持久化到 IndexedDB（`aether-ai-chat` → `chat-state`，见 `src/lib/chat-store.ts`），
+  首次读取时自动迁移旧 `localStorage` 数据，刷新不丢失
 - 时间智能显示（刚刚 / 具体时间）
 
 ### 模型
@@ -66,6 +67,13 @@ npm run preview
 `src/app/App.tsx` 中 `AUTO_TITLE_ENABLED` 默认为 `false`。
 开启后，会话消息每满 10 条会调用一次 `/v1/agent` 生成标题并自动覆盖初始标题；
 用户手动改过的标题不会被覆盖。
+
+## 导入历史聊天记录（手动运维）
+
+若旧版（localStorage 时代）导出的聊天记录 JSON 需要恢复，使用
+`scripts/import-chat-json.js`：在 `/chat` 页面 DevTools Console 中整体粘贴该脚本，
+按提示选中 JSON 文件，成功后会写入 IndexedDB，刷新页面即可查看。
+详见脚本顶部注释。
 
 ## 目录结构
 

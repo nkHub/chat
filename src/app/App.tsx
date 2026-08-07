@@ -56,7 +56,8 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import { fetchModels, runAgent, runAgentStream, resolveDeclaredTools, type AgentMessage, type ApiModel, type ContextWarning } from "@/lib/agent-api";
+import { fetchModels, runAgent, runAgentStream, resolveDeclaredTools, API_BASE_URL, type AgentMessage, type ApiModel, type ContextWarning } from "@/lib/agent-api";
+import { loadChatState, saveChatState } from "@/lib/chat-store";
 
 type ThemePreset = {
   key: string;
@@ -131,8 +132,8 @@ type StoredChatState = {
   assistants?: Omit<AssistantDef, "icon" | "color">[];
 };
 
-const CHAT_STORAGE_KEY = "aether-ai-chat-state";
 // 外观模式独立持久化，与会话状态解耦（也方便 index.html 首屏脚本只读该键避免闪烁）。
+// 注：聊天会话状态已迁移到 IndexedDB（见 src/lib/chat-store.ts），不再使用 localStorage。
 const THEME_MODE_KEY = "aether-ai-theme-mode";
 // 主题色独立持久化：key 对应 THEMES 中的 theme.key，读取失败/非法时回退到默认蓝色。
 const THEME_KEY = "aether-ai-theme-key";
@@ -179,29 +180,21 @@ const DEFAULT_ASSISTANTS: AssistantDef[] = [
   { id: "coder", name: "编码助手", description: "分析代码、定位问题，给出可落地的实现建议。", icon: Cpu, color: "bg-emerald-100 text-emerald-600" },
 ];
 
-function readStoredChatState(): StoredChatState | null {
-  if (typeof window === "undefined") return null;
-  try {
-    const raw = window.localStorage.getItem(CHAT_STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as StoredChatState;
-    if (parsed && typeof parsed === "object") {
-      // 迁移旧数据：会话时间跟随最后一条消息的时间（空会话保留创建时间），
-      // 早期"刚刚"硬编码的会话补上当前时刻。
-      if (Array.isArray(parsed.sessions)) {
-        parsed.sessions = parsed.sessions.map(session => {
-          const list = parsed.allMessages?.[session.id];
-          const lastTime = list && list.length > 0 ? list[list.length - 1].time : "";
-          const time = lastTime || (session.time === "刚刚" ? nowTime() : session.time);
-          return { ...session, time };
-        });
-      }
-      return parsed;
-    }
-    return null;
-  } catch {
-    return null;
+// 规范化从存储层读出的聊天状态：
+// 迁移旧数据：会话时间跟随最后一条消息的时间（空会话保留创建时间），
+// 早期"刚刚"硬编码的会话补上当前时刻。非法/损坏数据返回 null。
+function normalizeStoredState(parsed: unknown): StoredChatState | null {
+  if (!parsed || typeof parsed !== "object") return null;
+  const state = parsed as StoredChatState;
+  if (Array.isArray(state.sessions)) {
+    state.sessions = state.sessions.map(session => {
+      const list = state.allMessages?.[session.id];
+      const lastTime = list && list.length > 0 ? list[list.length - 1].time : "";
+      const time = lastTime || (session.time === "刚刚" ? nowTime() : session.time);
+      return { ...session, time };
+    });
   }
+  return state;
 }
 
 function toChatModel(model: ApiModel): ChatModel {
@@ -469,7 +462,9 @@ function ThinkingBlock({ text, defaultOpen = false }: { text: string; defaultOpe
 }
 
 // 把服务端返回的图片 http_url（http://127.0.0.1:{port}/agent-uploads/xxx）转成
-// 经 Vite 代理的相对路径 /akm-api/agent-uploads/xxx，避免端口硬编码与跨源问题。
+// 可访问的相对路径：开发模式经 Vite 代理走 /akm-api/agent-uploads/xxx，
+// 打包为 AKM 插件同源部署时 API_BASE_URL 为空串，直接走 /agent-uploads/xxx。
+// 避免端口硬编码与跨源问题。
 // 图片点击预览：通过 Context 向各图片渲染处暴露"打开大图预览"回调。
 const PreviewContext = createContext<{ openPreview: (url: string) => void }>({ openPreview: () => {} });
 
@@ -489,7 +484,7 @@ function Lightbox({ url, onClose }: { url: string; onClose: () => void }) {
 
 function toImageSrc(url: string): string {
   const match = url.match(/^https?:\/\/[^/]+(\/agent-uploads\/[^/]+)/);
-  return match ? `/akm-api${match[1]}` : url;
+  return match ? `${API_BASE_URL}${match[1]}` : url;
 }
 
 // 提取图片生成/编辑工具返回的图片 URL 列表，用于直接预览。
@@ -1192,37 +1187,58 @@ function AssistantPage({ sidebarOpen, onToggle, onStart, assistants, onAdd, onEd
 }
 
 export default function App() {
-  const [storedState] = useState<StoredChatState | null>(() => readStoredChatState());
-  const [assistants, setAssistants] = useState<AssistantDef[]>(() => {
-    const stored = storedState?.assistants;
-    if (!stored) return DEFAULT_ASSISTANTS;
-    return stored.map(storedAssistant => {
-      const builtin = DEFAULT_ASSISTANTS.find(assistant => assistant.id === storedAssistant.id);
-      if (builtin) return { ...builtin, ...storedAssistant };
-      // 自定义助手：早期版本 description 是占位文案，迁移为直接显示提示词。
-      const migrated = { ...storedAssistant, icon: Bot, color: "bg-primary/10 text-primary" };
-      if (migrated.prompt && migrated.description === "自定义助手 · 使用你设定的提示词工作。") {
-        migrated.description = migrated.prompt;
-      }
-      return migrated;
-    });
-  });
-  const initialSessions = Array.isArray(storedState?.sessions) ? storedState.sessions : [];
-  const initialMessages = storedState?.allMessages ?? {};
-  const initialActiveSession = storedState?.activeSession && initialSessions.some(session => session.id === storedState.activeSession)
-    ? storedState.activeSession
-    : initialSessions[0]?.id || "";
+  // 已保存的聊天状态：IndexedDB 读取是异步的，故初始为 null，
+  // 挂载后经 loadChatState 恢复；stateLoaded 标记恢复完成，
+  // 在此之前不保存（避免用空数据覆盖已存记录）。
+  const [storedState, setStoredState] = useState<StoredChatState | null>(null);
+  const [stateLoaded, setStateLoaded] = useState(false);
 
+  const [assistants, setAssistants] = useState<AssistantDef[]>(DEFAULT_ASSISTANTS);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [activePage, setActivePage] = useState("chat");
-  const [sessions, setSessions] = useState<Session[]>(initialSessions);
-  const [activeSession, setActiveSession] = useState(initialActiveSession);
-  const [allMessages, setAllMessages] = useState<Record<string, Message[]>>(initialMessages);
+  const [sessions, setSessions] = useState<Session[]>([]);
+  const [activeSession, setActiveSession] = useState("");
+  const [allMessages, setAllMessages] = useState<Record<string, Message[]>>({});
   const [models, setModels] = useState<ChatModel[]>([]);
   const [selectedModel, setSelectedModel] = useState<ChatModel | null>(null);
   const [modelsLoading, setModelsLoading] = useState(true);
   const [modelsError, setModelsError] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
+
+  // 挂载后异步恢复已保存的聊天状态（IndexedDB 优先，旧 localStorage 数据自动迁移）。
+  useEffect(() => {
+    let cancelled = false;
+    void loadChatState().then(parsed => {
+      if (cancelled) return;
+      const state = normalizeStoredState(parsed);
+      setStoredState(state);
+      if (state) {
+        // 恢复助手列表：内置助手合并最新默认配置，自定义助手补齐图标与配色，
+        // 并迁移早期"占位描述"为直接显示提示词。
+        if (Array.isArray(state.assistants)) {
+          setAssistants(state.assistants.map(storedAssistant => {
+            const builtin = DEFAULT_ASSISTANTS.find(assistant => assistant.id === storedAssistant.id);
+            if (builtin) return { ...builtin, ...storedAssistant };
+            const migrated = { ...storedAssistant, icon: Bot, color: "bg-primary/10 text-primary" };
+            if (migrated.prompt && migrated.description === "自定义助手 · 使用你设定的提示词工作。") {
+              migrated.description = migrated.prompt;
+            }
+            return migrated;
+          }));
+        }
+        const initialSessions = Array.isArray(state.sessions) ? state.sessions : [];
+        setSessions(initialSessions);
+        setAllMessages(state.allMessages ?? {});
+        setActiveSession(
+          state.activeSession && initialSessions.some(session => session.id === state.activeSession)
+            ? state.activeSession
+            : initialSessions[0]?.id || ""
+        );
+      }
+      setStateLoaded(true);
+    });
+    return () => { cancelled = true; };
+  }, []);
   // 主题色默认蓝色；从本地存储恢复，键非法时回退到默认。
   const [activeTheme, setActiveTheme] = useState(() => {
     try {
@@ -1274,8 +1290,11 @@ export default function App() {
   };
 
   useEffect(() => {
+    // 等已保存状态恢复完成再加载模型，这样能正确恢复上次选中的模型
+    // （storedState?.selectedModelKey 依赖异步恢复结果）。
+    if (!stateLoaded) return;
     void loadModels();
-  }, []);
+  }, [stateLoaded]);
 
   // 依据外观模式切换深色模式：system 跟随系统偏好并监听其变化，light/dark 固定。
   // 同时按当前主题色 + 深浅模式应用内联 CSS 变量（深色用偏暗的 dark 配色）。
@@ -1313,20 +1332,22 @@ export default function App() {
   }, [themeMode]);
 
   useEffect(() => {
-    try {
-      // 持久化时剔除附件的 Blob 预览 URL（刷新即失效，避免残留无效字符串）。
-      const cleanAllMessages = Object.fromEntries(Object.entries(allMessages).map(([sessionId, list]) => [sessionId, list.map(message => message.files ? { ...message, files: message.files.map(file => ({ name: file.name, type: file.type, size: file.size })) } : message)]));
-      window.localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify({
-        sessions,
-        allMessages: cleanAllMessages,
-        activeSession,
-        selectedModelKey: selectedModel?.key,
-        assistants: assistants.map(({ icon: _icon, color: _color, ...rest }) => rest),
-      } satisfies StoredChatState));
-    } catch {
-      // 本地存储不可用时仍保留当前会话，避免影响正在进行的请求。
-    }
-  }, [sessions, allMessages, activeSession, selectedModel, assistants]);
+    // 状态恢复完成前不写，避免用初始空状态覆盖已保存的记录。
+    if (!stateLoaded) return;
+    // 持久化时剔除附件的 Blob 预览 URL（刷新即失效，避免残留无效字符串）。
+    const cleanAllMessages = Object.fromEntries(Object.entries(allMessages).map(([sessionId, list]) => [sessionId, list.map(message => message.files ? { ...message, files: message.files.map(file => ({ name: file.name, type: file.type, size: file.size })) } : message)]));
+    const state: StoredChatState = {
+      sessions,
+      allMessages: cleanAllMessages,
+      activeSession,
+      selectedModelKey: selectedModel?.key,
+      assistants: assistants.map(({ icon: _icon, color: _color, ...rest }) => rest),
+    };
+    // IndexedDB 写入失败时给出可见提示，不再像 localStorage 那样静默丢数据。
+    void saveChatState(state).catch(error => {
+      console.warn("[chat] 聊天记录保存失败：", error);
+    });
+  }, [sessions, allMessages, activeSession, selectedModel, assistants, stateLoaded]);
 
   const newSession = () => {
     const id = `new-${Date.now()}`;

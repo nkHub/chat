@@ -526,7 +526,9 @@ export type AgentStreamEvent = {
 
 // 开发环境默认通过 Vite 代理访问本机 AKM，避免浏览器直接跨源请求被 CORS 拦截。
 // 部署到其它地址时可用 VITE_AKM_API_URL 覆盖，例如 http://127.0.0.1:8800。
-const API_BASE_URL = (import.meta.env.VITE_AKM_API_URL || "/akm-api").replace(/\/+$/, "");
+// 打包为 AKM 插件时传 VITE_AKM_API_URL=""（空字符串，同源部署），请求即走
+// 相对路径 /v1/agent。这里用空值合并（??）而非 ||，使空字符串可覆盖默认值。
+export const API_BASE_URL = (import.meta.env.VITE_AKM_API_URL ?? "/akm-api").replace(/\/+$/, "");
 
 function getErrorMessage(payload: unknown, status: number) {
   if (payload && typeof payload === "object") {
