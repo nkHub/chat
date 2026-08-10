@@ -232,6 +232,32 @@ function formatDisplayTime(value: string) {
   return `${month}:${day}`;
 }
 
+// 会话列表使用的相对时间：随时间推进持续变化（配合侧栏的定时/回前台刷新）。
+// 超过本周的会话用"MM-DD"（横杠分隔），避免与"时:分"歧义。
+function formatRelativeTime(value: string, now: Date = new Date()) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  const diffMs = now.getTime() - date.getTime();
+  if (diffMs < 0) return "刚刚";
+  const minutes = Math.floor(diffMs / 60000);
+  if (minutes < 1) return "刚刚";
+  if (minutes < 60) return `${minutes} 分钟前`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} 小时前`;
+  const days = Math.floor(hours / 24);
+  if (days === 1) return "昨天";
+  if (days < 7) return `${days} 天前`;
+  const startOfWeek = new Date(now);
+  startOfWeek.setHours(0, 0, 0, 0);
+  startOfWeek.setDate(startOfWeek.getDate() - ((startOfWeek.getDay() + 6) % 7));
+  if (date >= startOfWeek) {
+    return ["周日", "周一", "周二", "周三", "周四", "周五", "周六"][date.getDay()];
+  }
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${month}-${day}`;
+}
+
 function extractTextContent(content: unknown): string {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
@@ -631,6 +657,20 @@ function Sidebar({
   const [editValue, setEditValue] = useState("");
   const [dragId, setDragId] = useState<string | null>(null);
   const [overId, setOverId] = useState<string | null>(null);
+  // 相对时间的"当前时刻"：每分钟刷新一次；从后台切回页面时（visibilitychange）立即刷新，
+  // 保证会话列表的"x 分钟前/x 小时前"等时间显示保持新鲜。
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(new Date()), 60000);
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") setNow(new Date());
+    };
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", handleVisibility);
+    };
+  }, []);
   const links = [
     { icon: MessageSquare, label: "对话", page: "chat", plus: true },
     { icon: Cpu, label: "助手", page: "assistant", plus: false },
@@ -678,7 +718,7 @@ function Sidebar({
                     className={cn("mb-0.5 flex w-full cursor-pointer select-none items-center gap-1 rounded-md px-2.5 py-2 text-left transition-colors", dragId === session.id && "opacity-40", overId === session.id && "outline-2 outline-dashed outline-primary", session.id === activeSession ? "bg-primary/10 text-primary" : "text-foreground/55 hover:bg-black/[0.05] hover:text-foreground/80 dark:hover:bg-white/10 dark:hover:text-foreground")}
                   >
                     <span className="min-w-0 flex-1 truncate text-sm leading-snug">{session.title}</span>
-                    <span className="shrink-0 whitespace-nowrap text-xs text-foreground/30">{formatDisplayTime(session.time)}</span>
+                    <span className="shrink-0 whitespace-nowrap text-xs text-foreground/30">{formatRelativeTime(session.time, now)}</span>
                   </div>
                 </ContextMenuTrigger>
                 <ContextMenuContent className="w-44">
@@ -951,7 +991,7 @@ function ChatPage({
                   {message.segments.map((segment, segmentIndex) => {
                     if (segment.type === "text") {
                       return (
-                        <div key={`text-${segmentIndex}`} className="rounded-xl border bg-card px-4 py-3 shadow-sm">
+                        <div key={`text-${segmentIndex}`} className="min-w-0 rounded-xl border bg-card px-4 py-3 shadow-sm [overflow-wrap:anywhere]">
                           <MemoMarkdown content={segment.content} />
                           {message.citations && segmentIndex === message.segments!.length - 1 && <CitationsBlock citations={message.citations} />}
                         </div>
@@ -984,7 +1024,7 @@ function ChatPage({
                       <span>{message.streamStatus || "正在生成回复…"}</span>
                     </div>
                   ) : message.content ? (
-                    <div className="rounded-xl border bg-card px-4 py-3 shadow-sm">
+                    <div className="min-w-0 rounded-xl border bg-card px-4 py-3 shadow-sm [overflow-wrap:anywhere]">
                       <MemoMarkdown content={message.content} />
                       {message.citations && <CitationsBlock citations={message.citations} />}
                     </div>
@@ -1000,7 +1040,7 @@ function ChatPage({
           <div key={message.id} className="flex flex-row-reverse gap-3">
             <Avatar className="mt-0.5 h-7 w-7 shrink-0"><AvatarFallback className="bg-blue-100 text-xs font-bold text-blue-600">测</AvatarFallback></Avatar>
             <div className="flex max-w-[88%] flex-col items-end sm:max-w-[72%]">
-              <div className={cn("rounded-xl px-4 py-2.5 text-sm leading-relaxed transition-opacity", message.status === "send_failed" ? "border border-destructive/30 bg-destructive/5 text-destructive" : "bg-primary text-primary-foreground", message.status === "sending" && "opacity-60")}>{message.content}</div>
+              <div className={cn("min-w-0 rounded-xl px-4 py-2.5 text-sm leading-relaxed transition-opacity [overflow-wrap:anywhere]", message.status === "send_failed" ? "border border-destructive/30 bg-destructive/5 text-destructive" : "bg-primary text-primary-foreground", message.status === "sending" && "opacity-60")}>{message.content}</div>
               {message.files?.length ? <div className="mt-1.5 flex max-w-full flex-wrap justify-end gap-1.5">{message.files.map(file => file.type.startsWith("image/") && file.previewUrl ? <button key={`${file.name}-${file.size}`} type="button" aria-label={`预览${file.name}`} onClick={() => openPreview(file.previewUrl!)} className="overflow-hidden rounded-lg border border-primary/30 bg-white shadow-sm transition-transform hover:scale-105 dark:bg-muted"><img src={file.previewUrl} alt={file.name} className="h-12 w-12 object-cover" /></button> : <div key={`${file.name}-${file.size}`} className="flex max-w-[200px] items-center gap-1.5 rounded-lg border border-primary/30 bg-white px-2.5 py-1 text-xs font-medium text-primary dark:bg-muted"><ImageIcon size={11} className="shrink-0 text-primary/70" /><span className="truncate">{file.name}</span></div>)}</div> : null}
               {message.status === "sending" && <div className="mt-1 flex items-center gap-1"><Loader2 size={10} className="animate-spin text-muted-foreground" /><span className="text-xs text-muted-foreground">发送中…</span></div>}
               {message.status === "send_failed" && <StatusNotice status="send_failed" onRetry={() => onRetry(message.id)} />}
@@ -1272,7 +1312,7 @@ function AutomationPage({ sidebarOpen, onToggle, models, defaultModelKey }: { si
                       <button type="button" onClick={() => setDeleteTarget(task)} title="删除" className="rounded p-1 text-foreground/25 hover:bg-black/[0.06] hover:text-red-500 focus:outline-none dark:hover:bg-white/10"><Trash2 size={14} /></button>
                     </div>
                   </div>
-                  <p className="line-clamp-2 text-xs leading-relaxed text-muted-foreground">{describeTask(task)}</p>
+                  <p className="mb-2 line-clamp-2 text-xs leading-relaxed text-muted-foreground">{describeTask(task)}</p>
                   {/* 上次执行结果摘要（agent_call 执行后写回 payload.last_result） */}
                   {task.payload.last_result && (
                     <div className="mt-3 rounded-lg bg-muted/50 px-3 py-2 text-xs">
@@ -1285,12 +1325,12 @@ function AutomationPage({ sidebarOpen, onToggle, models, defaultModelKey }: { si
                     </div>
                   )}
                   <div className="mt-auto flex flex-wrap items-center justify-between gap-2 border-t pt-3 text-xs text-muted-foreground">
-                    <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                    <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-4 gap-y-1">
                       <span className="inline-flex items-center gap-1"><Clock size={12} />{formatInterval(task.interval_sec)}</span>
                       <span>上次运行：{formatTaskTime(task.last_run_at)}</span>
                       <span>下次运行：{formatTaskTime(task.next_run_at)}</span>
                     </div>
-                    <Button variant="ghost" size="sm" className="h-6 gap-1 text-xs" onClick={() => toggleEnabled(task)} disabled={busy} title={task.enabled ? "暂停该任务" : "启用该任务"}>
+                    <Button variant="ghost" size="sm" className="h-6 shrink-0 gap-1 text-xs" onClick={() => toggleEnabled(task)} disabled={busy} title={task.enabled ? "暂停该任务" : "启用该任务"}>
                       {task.enabled ? <Pause size={12} /> : <Play size={12} />}
                       {task.enabled ? "暂停" : "启用"}
                     </Button>
