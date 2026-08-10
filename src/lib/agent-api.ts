@@ -246,6 +246,27 @@ const AKM_DELETE_TASK_TOOL: AgentTool = {
   },
 };
 
+// 发送 macOS 原生系统通知（对应后端内置 akm_send_notification，agent_notify_enabled 默认开启才注册）。
+// 非只读，作为基础工具始终声明；适合 Agent 主动推送任务完成、定时提醒等短消息，不产生网络流量。
+const AKM_SEND_NOTIFICATION_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_send_notification",
+    description:
+      "发送 macOS 原生系统通知，在用户当前 Mac 桌面弹出提醒（需通过菜单栏启动 AKM 才能正常展示）。" +
+      "适合向用户主动推送任务完成、定时提醒、重要事件等短消息；不产生网络流量",
+    parameters: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "通知标题，建议简短" },
+        message: { type: "string", description: "通知正文内容" },
+        subtitle: { type: "string", description: "可选副标题" },
+      },
+      required: ["title", "message"],
+    },
+  },
+};
+
 // 查询 Token 用量统计（对应后端内置 akm_get_usage_stats，与 /api/stats 同源）。
 // 只读，作为基础工具始终声明；默认返回 1/7/30 天窗口，开启 cost_stats_enabled 时附带费用估算。
 const AKM_GET_USAGE_STATS_TOOL: AgentTool = {
@@ -528,6 +549,8 @@ export function resolveDeclaredTools(tools: string[]): AgentTool[] {
     AKM_LIST_TASKS_TOOL,
     AKM_CREATE_TASK_TOOL,
     AKM_DELETE_TASK_TOOL,
+    // 原生通知工具：后端默认注入（agent_notify_enabled 开启），这里始终声明，避免白名单时丢失
+    AKM_SEND_NOTIFICATION_TOOL,
   );
   // 工作区文件工具（读 + 写）：始终声明，可用性由后端配置开关控制
   declared.push(
