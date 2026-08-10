@@ -1,4 +1,4 @@
-import { Children, createContext, isValidElement, memo, useContext, useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from "react";
+import { Children, Fragment, createContext, isValidElement, memo, useContext, useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
@@ -18,6 +18,7 @@ import {
   Copy,
   Cpu,
   ExternalLink,
+  HelpCircle,
   ImageIcon,
   Loader2,
   MessageSquare,
@@ -40,6 +41,7 @@ import {
   ThumbsUp,
   Trash2,
   Wrench,
+  Workflow as WorkflowIcon,
   X,
   Zap,
 } from "lucide-react";
@@ -59,7 +61,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import { fetchModels, runAgent, runAgentStream, resolveDeclaredTools, listTasks, createTask, updateTask, deleteTask, runTask, API_BASE_URL, type AgentMessage, type ApiModel, type ContextWarning, type ScheduledTask, type TaskPayload, type TaskType } from "@/lib/agent-api";
+import { fetchModels, runAgent, runAgentStream, resolveDeclaredTools, listTasks, createTask, updateTask, deleteTask, runTask, listWorkflows, createWorkflow, updateWorkflow, deleteWorkflow, API_BASE_URL, type AgentMessage, type ApiModel, type ContextWarning, type ScheduledTask, type TaskPayload, type TaskType, type FlowNodeType, type NodeExecutor, type Workflow, type WorkflowEdge, type WorkflowNode, type WorkflowNodeData } from "@/lib/agent-api";
 import { loadChatState, saveChatState } from "@/lib/chat-store";
 
 type ThemePreset = {
@@ -75,7 +77,7 @@ type ThemePreset = {
 // 外观模式：system=跟随系统、light=浅色、dark=深色。默认跟随系统。
 type ThemeMode = "system" | "light" | "dark";
 
-type MessageStatus = "success" | "sending" | "send_failed" | "recv_failed";
+type MessageStatus = "success" | "sending" | "send_failed" | "recv_failed" | "asking";
 
 type Citation = {
   index: number;
@@ -118,6 +120,10 @@ type Message = {
   // compacted 为本次回复运行期间自动压缩上下文的次数（final 事件携带）。
   contextWarning?: ContextWarning;
   compacted?: number;
+  // AI 调用 akm_ask_user 工具时的澄清问题：question 为问题原文，options/multiple
+  // 对应三模式（无 options=自由文本、有 options 单选、options+multiple 多选），
+  // messages 为后端返回的完整工作消息（用户在下面回答后拼接该上下文续跑同一轮 Agent）。
+  askUser?: { question: string; options?: string[]; multiple?: boolean; messages: AgentMessage[] };
 };
 
 type Session = { id: string; title: string; time: string; tools?: string[]; modelKey?: string; instructions?: string; autoTitled?: boolean };
@@ -182,6 +188,43 @@ const DEFAULT_ASSISTANTS: AssistantDef[] = [
   { id: "writer", name: "写作助手", description: "把零散想法整理成清晰、有说服力的文字。", icon: Pencil, color: "bg-violet-100 text-violet-600" },
   { id: "coder", name: "编码助手", description: "分析代码、定位问题，给出可落地的实现建议。", icon: Cpu, color: "bg-emerald-100 text-emerald-600" },
 ];
+
+// ---- 工作流节点显示元信息（类型/颜色/执行器），flow 类型定义与 API 在 agent-api.ts ----
+// 节点类型：与 flow 引擎的 10 种内置节点一致；节点显示元信息（中文名/颜色/描述）参考 flow 配置页。
+const NODE_META: Record<FlowNodeType, { label: string; color: string; description: string }> = {
+  intake: { label: "需求输入", color: "#22c55e", description: "接收需求或用户输入" },
+  plan: { label: "方案规划", color: "#8b5cf6", description: "规划实现方案" },
+  code: { label: "编码实现", color: "#3b82f6", description: "编写代码" },
+  review: { label: "代码审查", color: "#f59e0b", description: "审查变更" },
+  test: { label: "测试验证", color: "#06b6d4", description: "运行测试" },
+  fix: { label: "修复迭代", color: "#ef4444", description: "修复失败项" },
+  human: { label: "人工审批", color: "#ec4899", description: "人工审批门" },
+  router: { label: "条件路由", color: "#14b8a6", description: "按条件分支" },
+  merge: { label: "汇合", color: "#64748b", description: "合并多条路径" },
+  output: { label: "交付输出", color: "#10b981", description: "汇总输出结果" },
+};
+
+// 节点执行器：决定该节点由谁执行，参考 flow 配置页的执行器下拉。
+const EXECUTOR_META: Record<NodeExecutor, { label: string; description: string }> = {
+  llm: { label: "LLM", description: "对话模型调用" },
+  "pi-agent": { label: "Pi Agent", description: "编码代理" },
+  human: { label: "人工", description: "人工审批门" },
+  none: { label: "无", description: "透传 / 合并，不调模型" },
+};
+
+// 按节点数组顺序自动生成相邻连线（展示用；后端可自行解析）。
+function buildFlowEdges(nodes: WorkflowNode[]): WorkflowEdge[] {
+  return nodes.slice(0, -1).map((node, index) => ({
+    id: `edge-${node.id}-${nodes[index + 1].id}`,
+    source: node.id,
+    target: nodes[index + 1].id,
+  }));
+}
+
+// 构造一个流程节点（新建工作流时的起始节点链、表单内添加节点共用）。
+function demoNode(id: string, type: FlowNodeType, label: string, data: Partial<WorkflowNodeData> = {}): WorkflowNode {
+  return { id, type, position: { x: 0, y: 0 }, data: { label, modelId: "", systemPrompt: "", userPromptTemplate: "", ...data } };
+}
 
 // 规范化从存储层读出的聊天状态：
 // 迁移旧数据：会话时间跟随最后一条消息的时间（空会话保留创建时间），
@@ -674,6 +717,7 @@ function Sidebar({
   const links = [
     { icon: MessageSquare, label: "对话", page: "chat", plus: true },
     { icon: Cpu, label: "助手", page: "assistant", plus: false },
+    { icon: WorkflowIcon, label: "工作流", page: "workflow", plus: false },
     { icon: Zap, label: "自动化", page: "automation", plus: false },
   ];
   return (
@@ -811,6 +855,96 @@ function ModelSettingsPopover({
   );
 }
 
+// AI 通过 akm_ask_user 工具提出的澄清问题卡片：
+// active 为 true（消息状态 asking）时显示回答区等待用户回答，提交后回调 onSubmit；
+// 回答提交或历史记录恢复后 active 为 false，只读展示问题原文。
+// 支持后端三模式：无 options 时自由文本输入框；options 单选点击即提交；
+// options + multiple 时 checkbox 多选后点确认提交（选中项以「、」拼接）。
+function AskUserCard({ question, options, multiple, active, onSubmit }: {
+  question: string;
+  options?: string[];
+  multiple?: boolean;
+  active: boolean;
+  onSubmit: (answer: string) => void;
+}) {
+  const [answer, setAnswer] = useState("");
+  const [selected, setSelected] = useState<string[]>([]);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const hasOptions = (options ?? []).length > 0;
+
+  // 激活时仅自由文本模式自动聚焦输入框；选项模式靠点击操作，无需聚焦。
+  useEffect(() => {
+    if (active && !hasOptions) inputRef.current?.focus();
+  }, [active, hasOptions]);
+
+  // 自由文本模式提交。
+  const submitText = () => {
+    const value = answer.trim();
+    if (!value) return;
+    onSubmit(value);
+    setAnswer("");
+  };
+
+  // 多选模式提交：选中项拼接后作为回答传给 AI。
+  const submitMultiple = () => {
+    if (selected.length === 0) return;
+    onSubmit(selected.join("、"));
+    setSelected([]);
+  };
+
+  // 切换某个选项的选中状态（多选）；单选直接提交该选项。
+  const toggleOption = (option: string) => {
+    if (multiple) {
+      setSelected(prev => prev.includes(option) ? prev.filter(item => item !== option) : [...prev, option]);
+    } else {
+      onSubmit(option);
+    }
+  };
+
+  return (
+    <div className="mt-3 rounded-xl border border-primary/25 bg-primary/[0.04] px-3.5 py-3">
+      <div className="flex items-start gap-2">
+        <HelpCircle size={15} className="mt-0.5 shrink-0 text-primary" />
+        <div className="min-w-0 flex-1">
+          <p className="text-xs font-medium text-foreground">需要确认一下：</p>
+          <p className="mt-1 text-sm leading-relaxed text-foreground/90">{question}</p>
+          {active && hasOptions ? (
+            <div className="mt-2.5 space-y-1.5">
+              {options!.map(option => multiple ? (
+                <label key={option} className="flex cursor-pointer items-center gap-2 rounded-lg border bg-background px-2.5 py-1.5 text-xs transition-colors hover:border-primary/40">
+                  <input type="checkbox" checked={selected.includes(option)} onChange={() => toggleOption(option)} className="h-3.5 w-3.5 accent-primary" />
+                  <span className="text-foreground/90">{option}</span>
+                </label>
+              ) : (
+                <button key={option} type="button" onClick={() => toggleOption(option)} className="flex w-full items-center rounded-lg border bg-background px-2.5 py-1.5 text-left text-xs transition-colors hover:border-primary/40 hover:bg-primary/5">
+                  <span className="text-foreground/90">{option}</span>
+                </button>
+              ))}
+              {multiple ? (
+                <Button size="sm" className="h-8 gap-1" onClick={submitMultiple} disabled={selected.length === 0}>确认</Button>
+              ) : null}
+            </div>
+          ) : null}
+          {active && !hasOptions ? (
+            <div className="mt-2.5 flex items-center gap-2">
+              <input
+                ref={inputRef}
+                value={answer}
+                onChange={event => setAnswer(event.target.value)}
+                onKeyDown={event => { if (event.key === "Enter" && !event.nativeEvent.isComposing) submitText(); }}
+                placeholder="在这里回答…"
+                className="min-w-0 flex-1 rounded-lg border bg-background px-3 py-1.5 text-sm outline-none focus:border-primary/60"
+              />
+              <Button size="sm" className="h-8 shrink-0 gap-1" onClick={submitText} disabled={!answer.trim()}>回答</Button>
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ChatPage({
   session,
   messages,
@@ -825,6 +959,7 @@ function ChatPage({
   onSend,
   onRetry,
   onStop,
+  onAnswer,
   tools,
   onToolsChange,
 }: {
@@ -840,6 +975,7 @@ function ChatPage({
   onReloadModels: () => void;
   onSend: (content: string, attachments: File[], tools: string[]) => void;
   onRetry: (id: string) => void;
+  onAnswer: (assistantMessageId: string, answer: string) => void;
   onStop: () => void;
   tools: string[];
   onToolsChange: (tools: string[]) => void;
@@ -1033,6 +1169,8 @@ function ChatPage({
               )}
               {message.status === "recv_failed" && <StatusNotice status="recv_failed" error={message.error} onRetry={() => onRetry(message.id)} />}
               <ContextHint compacted={message.compacted} />
+              {/* AI 提出的澄清问题：asking 状态可输入回答，回答后只读展示 */}
+              {message.askUser ? <AskUserCard question={message.askUser.question} options={message.askUser.options} multiple={message.askUser.multiple} active={message.status === "asking"} onSubmit={answer => onAnswer(message.id, answer)} /> : null}
               {messageText(message) && <div className="mt-1.5 flex items-center justify-between px-0.5"><MessageActions text={messageText(message)} /><span className="text-xs text-muted-foreground">{message.status === "sending" ? message.streamStatus : formatDisplayTime(message.time)}</span></div>}
             </div>
           </div>
@@ -1430,10 +1568,344 @@ function AutomationPage({ sidebarOpen, onToggle, models, defaultModelKey }: { si
   );
 }
 
-function WorkflowPage({ sidebarOpen, onToggle }: { sidebarOpen: boolean; onToggle: () => void }) {
-  const steps = [{ title: "接收输入", text: "从表单或 webhook 接收内容", icon: MessageSquare }, { title: "分析内容", text: "调用模型提取关键信息", icon: Brain }, { title: "执行动作", text: "将结果发送到目标服务", icon: Zap }];
-  return <><PageHeader title="工作流" subtitle="把多个步骤连接成可重复使用的流程" sidebarOpen={sidebarOpen} onToggle={onToggle} /><ScrollArea className="min-h-0 flex-1 bg-white"><div className="mx-auto max-w-4xl space-y-6 px-4 py-6 sm:px-8"><div className="flex flex-wrap items-end justify-between gap-4"><div><h2 className="text-xl font-semibold">我的工作流</h2><p className="mt-1 text-sm text-muted-foreground">从一个清晰的流程开始自动化你的工作。</p></div><Button className="gap-2"><Plus size={15} />新建工作流</Button></div><div className="rounded-xl border bg-card p-5 shadow-sm"><div className="flex items-start justify-between"><div><div className="flex items-center gap-2"><h3 className="text-sm font-semibold">内容摘要流程</h3><Badge variant="green" className="h-4 px-1.5 py-0 text-xs">已启用</Badge></div><p className="mt-1 text-xs text-muted-foreground">将长文本整理成适合分享的要点摘要。</p></div><Button variant="ghost" size="icon-sm" className="h-7 w-7 text-muted-foreground"><Settings size={14} /></Button></div><div className="mt-6 grid gap-2 md:grid-cols-[1fr_auto_1fr_auto_1fr] md:items-center">{steps.map((step, index) => <><div key={step.title} className="rounded-lg border bg-background px-3 py-3"><div className="mb-2 flex h-7 w-7 items-center justify-center rounded-md bg-primary/10 text-primary"><step.icon size={14} /></div><p className="text-xs font-semibold">{step.title}</p><p className="mt-1 text-xs leading-relaxed text-muted-foreground">{step.text}</p></div>{index < steps.length - 1 && <ArrowRight key={`arrow-${step.title}`} size={15} className="mx-auto rotate-90 text-muted-foreground md:rotate-0" />}</>)}</div></div></div></ScrollArea></>;
+// 工作流页面：展示工作流列表，支持新建/编辑（弹窗内配置节点参数，字段组织参考 flow 配置页）、删除。
+// 当前使用本地假数据（DEFAULT_WORKFLOWS），后续 ccs /v1/flow 稳定后切换到真实 API。
+function WorkflowPage({ sidebarOpen, onToggle, models }: {
+  sidebarOpen: boolean;
+  onToggle: () => void;
+  models: ChatModel[];
+}) {
+  // 列表数据：直接从 /v1/flow 拉取（ccs 后端 flow 已稳定）。
+  const [workflows, setWorkflows] = useState<Workflow[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  // 配置弹窗：打开状态、编辑目标（null 表示新建）、表单字段（名称/描述/节点列表/选中节点/待添加类型）。
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [editTarget, setEditTarget] = useState<Workflow | null>(null);
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [nodes, setNodes] = useState<WorkflowNode[]>([]);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [newNodeType, setNewNodeType] = useState<FlowNodeType>("plan");
+  const [deleteTarget, setDeleteTarget] = useState<Workflow | null>(null);
+
+  // 拉取工作流列表；失败时顶部显示错误提示，不打断其它操作。
+  const loadWorkflows = async () => {
+    setLoading(true);
+    try {
+      setWorkflows(await listWorkflows());
+      setError(null);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "加载工作流失败");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // 首次进入页面时加载工作流列表。
+  useEffect(() => { void loadWorkflows(); }, []);
+
+  // 关闭删除弹窗：延迟清除 body 残留的滚动/交互锁定（与其他弹窗一致）。
+  const closeDelete = () => {
+    setDeleteTarget(null);
+    window.setTimeout(clearModalResidue, 250);
+  };
+
+  // 关闭配置弹窗并清空表单，避免残留上次的编辑/添加状态。
+  const closeDialog = () => {
+    setDialogOpen(false);
+    setEditTarget(null);
+    setName("");
+    setDescription("");
+    setNodes([]);
+    setSelectedNodeId(null);
+    window.setTimeout(clearModalResidue, 250);
+  };
+
+  // 新建：预置"输入 → 规划 → 输出"三个节点的起始链，方便快速开始。
+  const openCreate = () => {
+    const now = Date.now();
+    const initial: WorkflowNode[] = [
+      demoNode(`wfnode-${now}-1`, "intake", NODE_META.intake.label, { userPromptTemplate: "{{input.prompt}}", executor: "none" }),
+      demoNode(`wfnode-${now}-2`, "plan", NODE_META.plan.label, { executor: "llm", temperature: 0.3, maxTokens: 2000 }),
+      demoNode(`wfnode-${now}-3`, "output", NODE_META.output.label, { executor: "none" }),
+    ];
+    setEditTarget(null);
+    setName("");
+    setDescription("");
+    setNodes(initial);
+    setSelectedNodeId(initial[0].id);
+    setNewNodeType("plan");
+    setDialogOpen(true);
+  };
+
+  // 编辑：预填当前工作流的名称、描述与节点（浅拷贝避免直接改 props）。
+  const openEdit = (workflow: Workflow) => {
+    setEditTarget(workflow);
+    setName(workflow.name);
+    setDescription(workflow.description ?? "");
+    setNodes(workflow.nodes.map(node => ({ ...node, data: { ...node.data } })));
+    setSelectedNodeId(workflow.nodes[0]?.id ?? null);
+    setNewNodeType("plan");
+    setDialogOpen(true);
+  };
+
+  const submit = async () => {
+    const trimmedName = name.trim();
+    if (!trimmedName || nodes.length === 0 || saving) return;
+    setSaving(true);
+    try {
+      // 新建交给后端生成 id/version/createdAt；更新只提交用户可编辑的字段。
+      if (editTarget) {
+        await updateWorkflow(editTarget.id, {
+          name: trimmedName,
+          description: description.trim(),
+          nodes,
+          edges: buildFlowEdges(nodes),
+        });
+      } else {
+        await createWorkflow({
+          name: trimmedName,
+          description: description.trim(),
+          nodes,
+          edges: buildFlowEdges(nodes),
+          variables: {},
+        });
+      }
+      setError(null);
+      closeDialog();
+      void loadWorkflows();
+    } catch (submitError) {
+      setError(submitError instanceof Error ? submitError.message : "保存工作流失败");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const confirmDelete = async () => {
+    if (!deleteTarget) return;
+    closeDelete();
+    try {
+      await deleteWorkflow(deleteTarget.id);
+      setError(null);
+      void loadWorkflows();
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : "删除工作流失败");
+    }
+  };
+
+  // 更新选中节点的 data 字段（label/modelId/提示词等）。
+  const patchSelectedNode = (patch: Partial<WorkflowNodeData>) => {
+    if (!selectedNodeId) return;
+    setNodes(prev => prev.map(node => node.id === selectedNodeId ? { ...node, data: { ...node.data, ...patch } } : node));
+  };
+
+  // 修改选中节点的类型。
+  const changeNodeType = (type: FlowNodeType) => {
+    if (!selectedNodeId) return;
+    setNodes(prev => prev.map(node => node.id === selectedNodeId ? { ...node, type } : node));
+  };
+
+  const addNode = () => {
+    const id = `wfnode-${Date.now()}-${nodes.length + 1}`;
+    const node = demoNode(id, newNodeType, NODE_META[newNodeType].label, { executor: newNodeType === "human" ? "human" : "llm" });
+    setNodes(prev => [...prev, node]);
+    setSelectedNodeId(id);
+  };
+
+  const removeNode = (id: string) => {
+    const next = nodes.filter(node => node.id !== id);
+    setNodes(next);
+    if (selectedNodeId === id) setSelectedNodeId(next[next.length - 1]?.id ?? null);
+  };
+
+  const selectedNode = nodes.find(node => node.id === selectedNodeId) ?? null;
+  const selectClass = "w-full rounded-lg border bg-background px-3 py-2 text-sm outline-none focus:border-primary/60";
+
+  return (
+    <>
+      <PageHeader title="工作流" subtitle="把多个步骤连接成可重复使用的流程" sidebarOpen={sidebarOpen} onToggle={onToggle} />
+      <ScrollArea className="min-h-0 flex-1 bg-white dark:bg-card">
+        <div className="mx-auto max-w-4xl space-y-6 px-4 py-6 sm:px-8">
+          <div className="flex flex-wrap items-end justify-between gap-4">
+            <div>
+              <h2 className="text-xl font-semibold">我的工作流</h2>
+              <p className="mt-1 text-sm text-muted-foreground">把多个 AI 步骤连接成可重复使用的流程。</p>
+            </div>
+            <Button className="gap-2" onClick={openCreate}><Plus size={15} />新建工作流</Button>
+          </div>
+          {error ? (
+            <div className="flex items-center gap-2 rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive"><AlertCircle size={16} className="shrink-0" />{error}</div>
+          ) : null}
+          {loading && workflows === null ? (
+            <div className="flex items-center justify-center rounded-xl border border-dashed border-border bg-card/50 py-16 text-muted-foreground"><Loader2 size={18} className="mr-2 animate-spin" />加载中…</div>
+          ) : (workflows ?? []).length === 0 ? (
+            <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-border bg-card/50 px-6 py-16 text-center">
+              <WorkflowIcon size={28} className="mb-3 text-foreground/25" />
+              <p className="text-sm font-medium text-foreground/70">还没有工作流</p>
+              <p className="mt-1 text-xs text-muted-foreground">点击「新建工作流」创建你的第一个自动化流程。</p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {(workflows ?? []).map(workflow => (
+                <div key={workflow.id} className="group relative rounded-xl border bg-card p-4 shadow-sm transition-all hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-md">
+                  <div className="absolute right-2.5 top-2.5 flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+                    <button type="button" onClick={() => openEdit(workflow)} className="rounded p-1 text-foreground/25 hover:bg-black/[0.06] hover:text-foreground focus:outline-none dark:hover:bg-white/10" title="编辑工作流"><Pencil size={14} /></button>
+                    <button type="button" onClick={() => setDeleteTarget(workflow)} className="rounded p-1 text-foreground/25 hover:bg-black/[0.06] hover:text-red-500 focus:outline-none dark:hover:bg-white/10" title="删除工作流"><Trash2 size={14} /></button>
+                  </div>
+                  <div className="pr-16">
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-sm font-semibold text-foreground">{workflow.name}</h3>
+                      <Badge variant="secondary" className="h-4 px-1.5 py-0 text-xs">v{workflow.version}</Badge>
+                    </div>
+                    {workflow.description ? <p className="mt-1 line-clamp-2 text-xs leading-relaxed text-muted-foreground">{workflow.description}</p> : null}
+                  </div>
+                  <div className="mt-3 flex flex-wrap items-center gap-1.5">
+                    {workflow.nodes.map((node, index) => (
+                      <Fragment key={node.id}>
+                        {index > 0 && <ArrowRight size={12} className="shrink-0 text-muted-foreground/50" />}
+                        <span className="inline-flex items-center gap-1 rounded-md border bg-background px-1.5 py-0.5 text-xs text-foreground/80">
+                          <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: NODE_META[node.type].color }} />
+                          {node.data.label || NODE_META[node.type].label}
+                        </span>
+                      </Fragment>
+                    ))}
+                  </div>
+                  <div className="mt-3 border-t border-border/60 pt-2 text-xs text-muted-foreground">{workflow.nodes.length} 个节点 · 更新于 {formatDisplayTime(workflow.updatedAt)}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </ScrollArea>
+
+      {/* 新建 / 编辑工作流配置弹窗：左侧节点列表，右侧选中节点的参数编辑（参考 flow 配置页字段） */}
+      <Dialog open={dialogOpen} onOpenChange={value => { if (!value) closeDialog(); }}>
+        <DialogContent className="max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>{editTarget ? "编辑工作流" : "新建工作流"}</DialogTitle>
+            <DialogDescription>配置流程名称与各步骤节点参数。</DialogDescription>
+          </DialogHeader>
+          <div className="mt-4 space-y-4">
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div>
+                <label className="mb-1 block text-xs font-medium text-foreground/80">名称</label>
+                <input value={name} onChange={event => setName(event.target.value)} placeholder="例如：标准开发流程" autoFocus className="w-full rounded-lg border bg-background px-3 py-2 text-sm outline-none focus:border-primary/60" />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-medium text-foreground/80">描述（可选）</label>
+                <input value={description} onChange={event => setDescription(event.target.value)} placeholder="这个工作流做什么？" className="w-full rounded-lg border bg-background px-3 py-2 text-sm outline-none focus:border-primary/60" />
+              </div>
+            </div>
+            <Separator />
+            <div className="text-xs font-semibold text-foreground/80">节点配置</div>
+            <div className="flex flex-col gap-4 md:flex-row">
+              <div className="w-full shrink-0 md:w-52">
+                <div className="space-y-1">
+                  {nodes.map(node => (
+                    <button key={node.id} type="button" onClick={() => setSelectedNodeId(node.id)} className={cn("group flex w-full items-center gap-2 rounded-lg border px-2.5 py-2 text-left transition-colors", selectedNodeId === node.id ? "border-primary/60 bg-primary/5" : "border-border hover:border-primary/30")}>
+                      <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: NODE_META[node.type].color }} />
+                      <span className="min-w-0 flex-1 truncate text-xs font-medium text-foreground">{node.data.label || NODE_META[node.type].label}</span>
+                      <span className="text-[10px] text-muted-foreground">{NODE_META[node.type].label}</span>
+                      <span role="button" tabIndex={-1} onClick={event => { event.stopPropagation(); removeNode(node.id); }} className="hidden shrink-0 rounded p-0.5 text-foreground/25 hover:text-red-500 group-hover:inline" title="删除节点"><X size={12} /></span>
+                    </button>
+                  ))}
+                </div>
+                <div className="mt-2 flex gap-1.5">
+                  <select value={newNodeType} onChange={event => setNewNodeType(event.target.value as FlowNodeType)} className="min-w-0 flex-1 rounded-lg border bg-background px-2 py-1.5 text-xs outline-none focus:border-primary/60">
+                    {(Object.keys(NODE_META) as FlowNodeType[]).map(type => <option key={type} value={type}>{NODE_META[type].label}</option>)}
+                  </select>
+                  <Button size="sm" variant="outline" className="h-8 shrink-0 px-2" onClick={addNode} title="添加节点"><Plus size={13} /></Button>
+                </div>
+              </div>
+              <div className="min-w-0 flex-1 space-y-3 rounded-xl border bg-background p-3">
+                {selectedNode ? (
+                  <>
+                    <div>
+                      <label className="mb-1 block text-xs font-medium text-foreground/80">节点名称</label>
+                      <input value={selectedNode.data.label} onChange={event => patchSelectedNode({ label: event.target.value })} placeholder="节点在流程中的显示名称" className={selectClass} />
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="mb-1 block text-xs font-medium text-foreground/80">类型</label>
+                        <select value={selectedNode.type} onChange={event => changeNodeType(event.target.value as FlowNodeType)} className={selectClass}>
+                          {(Object.keys(NODE_META) as FlowNodeType[]).map(type => <option key={type} value={type}>{NODE_META[type].label}</option>)}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="mb-1 block text-xs font-medium text-foreground/80">执行器</label>
+                        <select value={selectedNode.data.executor ?? "llm"} onChange={event => patchSelectedNode({ executor: event.target.value as NodeExecutor })} className={selectClass}>
+                          {(Object.keys(EXECUTOR_META) as NodeExecutor[]).map(key => <option key={key} value={key}>{EXECUTOR_META[key].label} · {EXECUTOR_META[key].description}</option>)}
+                        </select>
+                      </div>
+                    </div>
+                    {selectedNode.data.executor !== "none" ? (
+                      <>
+                        <div>
+                          <label className="mb-1 block text-xs font-medium text-foreground/80">模型</label>
+                          <select value={selectedNode.data.modelId} onChange={event => patchSelectedNode({ modelId: event.target.value })} className={selectClass}>
+                            <option value="">默认模型</option>
+                            {models.map(model => <option key={model.key} value={model.key}>{model.label}</option>)}
+                          </select>
+                        </div>
+                        <div className="grid grid-cols-2 gap-3">
+                          <div>
+                            <label className="mb-1 block text-xs font-medium text-foreground/80">温度 temperature</label>
+                            <input type="number" step="0.1" min={0} max={2} value={selectedNode.data.temperature ?? ""} onChange={event => patchSelectedNode({ temperature: event.target.value ? Number(event.target.value) : undefined })} placeholder="0~2" className={selectClass} />
+                          </div>
+                          <div>
+                            <label className="mb-1 block text-xs font-medium text-foreground/80">最大输出 maxTokens</label>
+                            <input type="number" min={0} value={selectedNode.data.maxTokens ?? ""} onChange={event => patchSelectedNode({ maxTokens: event.target.value ? Number(event.target.value) : undefined })} placeholder="留空不限制" className={selectClass} />
+                          </div>
+                        </div>
+                        <div>
+                          <label className="mb-1 block text-xs font-medium text-foreground/80">系统提示 systemPrompt</label>
+                          <textarea rows={3} value={selectedNode.data.systemPrompt} onChange={event => patchSelectedNode({ systemPrompt: event.target.value })} placeholder="角色设定与行为约束" className={cn(selectClass, "resize-y leading-relaxed")} />
+                        </div>
+                        <div>
+                          <label className="mb-1 block text-xs font-medium text-foreground/80">用户提示模板 userPromptTemplate</label>
+                          <textarea rows={2} value={selectedNode.data.userPromptTemplate} onChange={event => patchSelectedNode({ userPromptTemplate: event.target.value })} placeholder="支持 {{input.prompt}} / {{vars.*}} / {{artifacts.别名}}" className={cn(selectClass, "resize-y leading-relaxed")} />
+                        </div>
+                        <div>
+                          <label className="mb-1 block text-xs font-medium text-foreground/80">产物别名 artifactKey（可选）</label>
+                          <input value={selectedNode.data.artifactKey ?? ""} onChange={event => patchSelectedNode({ artifactKey: event.target.value })} placeholder="供下游模板引用，如 report" className={selectClass} />
+                        </div>
+                      </>
+                    ) : (
+                      <p className="py-2 text-xs leading-relaxed text-muted-foreground">执行器为「无」时透传或合并，不调用模型。</p>
+                    )}
+                  </>
+                ) : (
+                  <div className="py-10 text-center text-xs text-muted-foreground">选择左侧节点进行配置</div>
+                )}
+              </div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="ghost" onClick={closeDialog}>取消</Button>
+            <Button onClick={submit} disabled={!name.trim() || nodes.length === 0 || saving}>{saving ? <Loader2 size={14} className="animate-spin" /> : null}保存</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 删除工作流确认弹窗 */}
+      <Dialog open={deleteTarget !== null} onOpenChange={value => { if (!value) closeDelete(); }}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>删除工作流</DialogTitle>
+            <DialogDescription>确定要删除「{deleteTarget?.name}」吗？此操作不可撤销。</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="ghost" onClick={closeDelete}>取消</Button>
+            <Button variant="destructive" onClick={confirmDelete}>删除</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
 }
+
 
 function AssistantPage({ sidebarOpen, onToggle, onStart, assistants, onAdd, onEdit, onDelete }: {
   sidebarOpen: boolean;
@@ -1605,12 +2077,13 @@ export default function App() {
         }
         const initialSessions = Array.isArray(state.sessions) ? state.sessions : [];
         setSessions(initialSessions);
-        // 刷新时上一次回复可能仍在生成中，sending 状态被持久化后会让 isReplyPending
-        // 永远为 true（发送按钮被"停止"卡死、无法继续发送）。这里把残留的 sending
-        // 消息降级为 success（保留已输出内容），因为刷新后不存在进行中的请求。
+        // 刷新时上一次回复可能仍在生成中，sending/asking 状态被持久化后会让
+        // isReplyPending 永远为 true（发送按钮被"停止"卡死、无法继续发送）。这里把
+        // 残留的 sending/asking 消息降级为 success（sending 保留已输出内容、asking
+        // 保留 askUser 只读展示），因为刷新后不存在进行中的请求。
         const restoredMessages: Record<string, Message[]> = {};
         for (const [sessionId, sessionMessages] of Object.entries(state.allMessages ?? {})) {
-          restoredMessages[sessionId] = sessionMessages.map(message => message.status === "sending"
+          restoredMessages[sessionId] = sessionMessages.map(message => message.status === "sending" || message.status === "asking"
             ? { ...message, status: "success" as const, ...(message.role === "assistant" ? { streamStatus: undefined } : {}) }
             : message);
         }
@@ -1776,7 +2249,9 @@ export default function App() {
     if (messageCount >= 10 && messageCount % 10 === 0) void generateSessionTitle(sessionId);
   };
 
-  const requestAgent = async (sessionId: string, userMessageId: string, assistantMessageId: string, requestHistory: Message[], files: File[] = [], tools: string[] = []) => {
+  const requestAgent = async (sessionId: string, userMessageId: string, assistantMessageId: string, requestHistory: Message[], files: File[] = [], tools: string[] = [], baseMessages?: AgentMessage[]) => {
+    // baseMessages 为 akm_ask_user 续跑时后端返回的完整工作消息：回答会追加在其后，
+    // 让同一轮 Agent 在原有上下文上继续，而不是另起新会话。
     // 为本次流式请求创建中断控制器：点击"停止"时 abort，前端停止读取流，
     // 后端检测到连接断开后也会主动停止生成，避免中断后继续烧 token。
     const controller = new AbortController();
@@ -1859,6 +2334,8 @@ export default function App() {
 
     try {
       let completed = false;
+      // AI 询问用户（akm_ask_user）时暂存的澄清内容；有值说明本轮已转为等待回答。
+      let askPending: { question: string; options?: string[]; multiple?: boolean; messages: AgentMessage[] } | null = null;
       // 收到第一条回复事件后立即把用户消息标记为已发送成功，不再显示"发送中"。
       let userMarked = false;
 
@@ -1884,7 +2361,8 @@ export default function App() {
 
       for await (const event of runAgentStream({
         model: modelKey,
-        messages: toAgentMessages(requestHistory),
+        // 续跑时把后端返回的工作消息作为基底，再追加当前请求的会话消息。
+        messages: baseMessages ? [...baseMessages, ...toAgentMessages(requestHistory)] : toAgentMessages(requestHistory),
         instructions: (sessions.find(session => session.id === sessionId)?.instructions ?? AGENT_INSTRUCTIONS) + searchHint + imageHint,
         tools: declaredTools.length ? declaredTools : undefined,
         files,
@@ -1938,6 +2416,16 @@ export default function App() {
             }
           }
           updateAssistant({ segments: segments.slice(), streamStatus: `已完成 ${name}，正在整理回复…` });
+        } else if (event.event === "ask_user") {
+          // AI 通过 akm_ask_user 工具询问用户：记录问题与后端返回的完整工作消息，
+          // 本轮不再走 final 收尾，把回复置为 asking，等待用户在界面回答问题后续跑。
+          finalizeStream();
+          askPending = {
+            question: event.data.question || "请补充信息以继续。",
+            options: event.data.options ?? [],
+            multiple: Boolean(event.data.multiple),
+            messages: event.data.messages ?? [],
+          };
         } else if (event.event === "error") {
           throw new Error(event.data.error || "Agent 请求失败");
         } else if (event.event === "final") {
@@ -1990,9 +2478,21 @@ export default function App() {
       finalizeStream();
       if (segments.length) updateAssistant({ segments: segments.slice() });
 
-      if (!completed) throw new Error("Agent 未返回最终消息");
-      // 回复成功后按累计消息数触发标题自动生成（每满 10 条一次）。
-      maybeAutoTitle(sessionId, requestHistory.length + 1);
+      if (askPending) {
+        // 交互澄清：保留已输出的内容，把回复标记为 asking（前端显示问题卡片等待回答）。
+        setAllMessages(prev => ({
+          ...prev,
+          [sessionId]: (prev[sessionId] ?? []).map(message => {
+            if (message.id === userMessageId) return { ...message, status: "success" as const };
+            if (message.id !== assistantMessageId) return message;
+            return { ...message, status: "asking" as const, streamStatus: undefined, askUser: askPending, segments: segments.slice() };
+          }),
+        }));
+      } else {
+        if (!completed) throw new Error("Agent 未返回最终消息");
+        // 回复成功后按累计消息数触发标题自动生成（每满 10 条一次）。
+        maybeAutoTitle(sessionId, requestHistory.length + 1);
+      }
     } catch (error) {
       // 出错时同样冲刷残留增量，尽量保留已输出的内容。
       finalizeStream();
@@ -2045,6 +2545,35 @@ export default function App() {
 
   // 中断当前正在生成的回复：abort 流式请求，保留已输出内容并收尾。
   const stopReply = () => { activeRequestRef.current?.abort(); };
+
+  // 用户回答 AI 的澄清问题（akm_ask_user）：把回答作为新用户消息追加，
+  // 并用后端返回的完整工作消息（ask.messages）作为基底续跑同一轮 Agent。
+  const answerQuestion = (assistantMessageId: string, answer: string) => {
+    const sessionId = activeSession;
+    if (!sessionId) return;
+    const snapshot = allMessages[sessionId] ?? [];
+    const target = snapshot.find(message => message.id === assistantMessageId);
+    // 只有仍处于 asking（等待回答）状态的澄清问题才允许作答，防止重复提交。
+    if (!target?.askUser || target.status !== "asking") return;
+
+    const answerMessage: Message = {
+      id: `${sessionId}-user-${Date.now()}`,
+      role: "user",
+      content: answer,
+      time: nowTime(),
+      status: "success",
+    };
+    // 冻结原询问消息（回到 success，只读展示问题），并追加回答消息。
+    setAllMessages(prev => ({
+      ...prev,
+      [sessionId]: (prev[sessionId] ?? [])
+        .map(message => message.id === assistantMessageId ? { ...message, status: "success" as const, streamStatus: undefined } : message)
+        .concat([answerMessage]),
+    }));
+    // 续跑沿用当前会话的工具开关，保持白名单声明一致。
+    const sessionTools = sessions.find(session => session.id === sessionId)?.tools ?? [];
+    void requestAgent(sessionId, answerMessage.id, `${sessionId}-assistant-${Date.now()}`, [answerMessage], [], sessionTools, target.askUser.messages);
+  };
 
   const retryMessage = (id: string) => {
     const sessionId = activeSession;
@@ -2109,9 +2638,9 @@ export default function App() {
 
   const content = useMemo(() => {
     if (activePage === "automation") return <AutomationPage sidebarOpen={sidebarOpen} onToggle={() => setSidebarOpen(value => !value)} models={models} defaultModelKey={selectedModel?.key ?? ""} />;
-    if (activePage === "workflow") return <WorkflowPage sidebarOpen={sidebarOpen} onToggle={() => setSidebarOpen(value => !value)} />;
+    if (activePage === "workflow") return <WorkflowPage sidebarOpen={sidebarOpen} onToggle={() => setSidebarOpen(value => !value)} models={models} />;
     if (activePage === "assistant") return <AssistantPage sidebarOpen={sidebarOpen} onToggle={() => setSidebarOpen(value => !value)} assistants={assistants} onAdd={(name, prompt) => setAssistants(prev => [{ id: `custom-${Date.now()}`, name, description: prompt, prompt, icon: Bot, color: "bg-primary/10 text-primary" }, ...prev])} onEdit={(id, name, prompt) => setAssistants(prev => prev.map(assistant => assistant.id === id ? { ...assistant, name, ...(prompt ? { prompt, description: prompt } : {}) } : assistant))} onStart={assistantId => { const assistant = assistants.find(candidate => candidate.id === assistantId); const assistantName = assistant?.name ?? "助手"; const sessionId = `${assistantId}-${Date.now()}`; const message: Message = { id: `${assistantId}-message`, role: "user", content: `你好，请以「${assistantName}」的身份来帮我。`, time: nowTime(), status: "success" }; setSessions(prev => [{ id: sessionId, title: assistantName, time: nowTime(), ...(assistant?.prompt ? { instructions: assistant.prompt } : {}) }, ...prev]); setAllMessages(prev => ({ ...prev, [sessionId]: [message] })); setActiveSession(sessionId); setActivePage("chat"); }} onDelete={assistantId => setAssistants(prev => prev.filter(assistant => assistant.id !== assistantId))} />;
-    return <ChatPage session={activeSessionData} messages={messages} model={selectedModel} models={models} modelsLoading={modelsLoading} modelsError={modelsError} sidebarOpen={sidebarOpen} onToggleSidebar={() => setSidebarOpen(value => !value)} onModelChange={model => { setSelectedModel(model); if (activeSession) setSessions(prev => prev.map(session => session.id === activeSession ? { ...session, modelKey: model.key } : session)); }} onReloadModels={() => { void loadModels(); }}     onSend={(contentValue, attachments, tools) => sendMessage(contentValue, attachments, tools)} onRetry={retryMessage} onStop={stopReply} tools={activeSessionData?.tools ?? []} onToolsChange={tools => { if (!activeSession) return; setSessions(prev => prev.map(session => session.id === activeSession ? { ...session, tools } : session)); }} />;
+    return <ChatPage session={activeSessionData} messages={messages} model={selectedModel} models={models} modelsLoading={modelsLoading} modelsError={modelsError} sidebarOpen={sidebarOpen} onToggleSidebar={() => setSidebarOpen(value => !value)} onModelChange={model => { setSelectedModel(model); if (activeSession) setSessions(prev => prev.map(session => session.id === activeSession ? { ...session, modelKey: model.key } : session)); }} onReloadModels={() => { void loadModels(); }}     onSend={(contentValue, attachments, tools) => sendMessage(contentValue, attachments, tools)} onRetry={retryMessage} onStop={stopReply} onAnswer={answerQuestion} tools={activeSessionData?.tools ?? []} onToolsChange={tools => { if (!activeSession) return; setSessions(prev => prev.map(session => session.id === activeSession ? { ...session, tools } : session)); }} />;
   }, [activePage, activeSessionData, allMessages, messages, models, modelsLoading, modelsError, selectedModel, sidebarOpen, assistants]);
 
   return (

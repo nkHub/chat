@@ -189,6 +189,36 @@ const AKM_LOAD_SESSION_TOOL: AgentTool = {
   },
 };
 
+// 交互澄清工具（对应后端内置 akm_ask_user）：AI 信息不完整/有歧义时主动询问用户，
+// 而不是自己猜测。后端在默认注入与白名单注入（传了 tools）时都可用，仅显式传
+// 空数组 [] 才被排除，因此这里始终声明，保证走白名单时不被丢弃。触发时后端
+// 下发 ask_user SSE 事件（含 question/options/multiple 与可续跑的 messages），
+// 由前端 UI 展示并续跑。三种模式：只传 question=自由文本输入；加 options=从
+// 候选里单选（multiple 缺省 false）；options + multiple=true=可多选。
+const AKM_ASK_USER_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_ask_user",
+    description: "当你需要向用户确认信息才能继续时调用本工具：用户上一条消息信息不完整、存在歧义、缺少关键参数，或你需要用户做选择时，把想确认的内容作为 question 传给本工具，等待用户回答后继续。问题要具体、一次只问一件事，避免让用户费解。如果不传 options，用户以自由文本回答；传了 options 则用户从选项中挑选（multiple=true 可多选，否则单选）",
+    parameters: {
+      type: "object",
+      properties: {
+        question: { type: "string", description: "需要向用户确认的问题，需具体明确" },
+        options: {
+          type: "array",
+          items: { type: "string" },
+          description: "可选的候选答案列表。不传时用户自由文本回答；传入后用户从这些选项中挑选回答",
+        },
+        multiple: {
+          type: "boolean",
+          description: "传了 options 时是否允许用户多选（默认 false 单选）。不传 options 时本字段无意义",
+        },
+      },
+      required: ["question"],
+    },
+  },
+};
+
 // 列出定时任务（对应后端内置 akm_list_tasks）。
 // 只读，作为基础工具始终声明；返回任务 id、名称、类型、间隔、启用状态与执行时间。
 const AKM_LIST_TASKS_TOOL: AgentTool = {
@@ -242,6 +272,107 @@ const AKM_DELETE_TASK_TOOL: AgentTool = {
         task_id: { type: "string", description: "要删除的任务 id（来自 akm_list_tasks）" },
       },
       required: ["task_id"],
+    },
+  },
+};
+
+// 工作流引擎工具组（对应后端 akm_flow_*，build_builtin_tools 注册）：
+// 默认注入（未传 tools）时后端会注入全部内置工具含 akm_flow_*；显式传 tools 走
+// 白名单时需前端声明，这里始终声明，保证白名单注入时不被丢弃。
+// 6 个工具覆盖工作流引擎的查询/读取/保存/删除/运行/运行记录查看。
+
+const AKM_FLOW_LIST_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_flow_list",
+    description: "列出已配置的工作流（akm flow 工作流引擎）：返回工作流的 id、名称、描述、节点数与更新时间，不含完整定义",
+    parameters: {
+      type: "object",
+      properties: {},
+      required: [],
+    },
+  },
+};
+
+const AKM_FLOW_GET_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_flow_get",
+    description: "按 id 读取一条工作流的完整定义（nodes / edges / variables），供检查流程结构或复制修改",
+    parameters: {
+      type: "object",
+      properties: {
+        workflow_id: { type: "string", description: "工作流 id（来自 akm_flow_list）" },
+      },
+      required: ["workflow_id"],
+    },
+  },
+};
+
+const AKM_FLOW_SAVE_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_flow_save",
+    description: "创建或更新一条工作流定义：workflow_id 留空则新建，传 id 则更新已有工作流。nodes 为节点数组（含 type / label / data）、edges 为连线数组（含 source / target / condition / loop）、variables 为运行变量（如 projectPath / maxNodeVisits）",
+    parameters: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "工作流名称" },
+        nodes: { type: "array", description: "节点数组，每项含 type（intake/plan/code/review/test/fix/human/router/merge/output）与 data（label/modelId/systemPrompt/userPromptTemplate 等）" },
+        edges: { type: "array", description: "连线数组，每项含 source / target（节点 id），可选 condition（pass/fail/子串）与 loop" },
+        variables: { type: "object", description: "运行变量，如 projectPath / maxNodeVisits / useWorktree" },
+        description: { type: "string", description: "工作流描述，可选" },
+        workflow_id: { type: "string", description: "留空创建新工作流；传已有 id 则更新该工作流" },
+      },
+      required: ["name"],
+    },
+  },
+};
+
+const AKM_FLOW_DELETE_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_flow_delete",
+    description: "删除一条工作流及其全部运行记录，返回是否删除成功",
+    parameters: {
+      type: "object",
+      properties: {
+        workflow_id: { type: "string", description: "工作流 id（来自 akm_flow_list）" },
+      },
+      required: ["workflow_id"],
+    },
+  },
+};
+
+const AKM_FLOW_RUN_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_flow_run",
+    description: "启动一次工作流运行：传入工作流 id 与用户提示词 prompt，后台执行 DAG（LLM 节点 / 条件分支 / 循环重入 / 并行），返回运行 id 与初始状态；可用 akm_flow_runs 查询进度",
+    parameters: {
+      type: "object",
+      properties: {
+        workflow_id: { type: "string", description: "工作流 id（来自 akm_flow_list）" },
+        prompt: { type: "string", description: "用户提示词，作为工作流输入注入 {{input.prompt}}" },
+      },
+      required: ["workflow_id", "prompt"],
+    },
+  },
+};
+
+const AKM_FLOW_RUNS_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_flow_runs",
+    description: "列出工作流运行记录（按创建时间倒序）：返回运行 id、状态、输入摘要、token 用量与起止时间；可按 workflow_id 过滤",
+    parameters: {
+      type: "object",
+      properties: {
+        workflow_id: { type: "string", description: "按工作流 id 过滤，留空返回全部" },
+        limit: { type: "integer", description: "返回条数，默认 20，最大 100" },
+        offset: { type: "integer", description: "分页偏移，默认 0" },
+      },
+      required: [],
     },
   },
 };
@@ -625,10 +756,19 @@ export function resolveDeclaredTools(tools: string[]): AgentTool[] {
     AKM_LIST_PLUGINS_TOOL,
     AKM_LIST_SESSIONS_TOOL,
     AKM_LOAD_SESSION_TOOL,
+    // 交互澄清工具：后端默认注入，这里始终声明，保证显式传 tools 走白名单时不被丢弃
+    AKM_ASK_USER_TOOL,
     // 定时任务工具：后端默认注入，这里始终声明，保证显式传 tools 走白名单时不被丢弃
     AKM_LIST_TASKS_TOOL,
     AKM_CREATE_TASK_TOOL,
     AKM_DELETE_TASK_TOOL,
+    // 工作流引擎工具：后端默认注入（build_builtin_tools 注册），这里始终声明，避免白名单时丢失
+    AKM_FLOW_LIST_TOOL,
+    AKM_FLOW_GET_TOOL,
+    AKM_FLOW_SAVE_TOOL,
+    AKM_FLOW_DELETE_TOOL,
+    AKM_FLOW_RUN_TOOL,
+    AKM_FLOW_RUNS_TOOL,
     // 原生通知工具：后端默认注入（agent_notify_enabled 开启），这里始终声明，避免白名单时丢失
     AKM_SEND_NOTIFICATION_TOOL,
     // 原生系统工具：后端默认注入（agent_native_tools_enabled 开启），这里始终声明，避免白名单时丢失
@@ -660,7 +800,7 @@ export function resolveDeclaredTools(tools: string[]): AgentTool[] {
   return declared;
 }
 
-export type AgentStreamEventName = "reasoning_delta" | "model_delta" | "turn_start" | "tool_call" | "tool_result" | "context_warning" | "final" | "error";
+export type AgentStreamEventName = "reasoning_delta" | "model_delta" | "turn_start" | "tool_call" | "tool_result" | "context_warning" | "ask_user" | "final" | "error";
 
 // 上下文占用警告信息（对应后端 context_warning 事件）：
 // 上下文估算已用 / 上限 / 剩余 tokens、占用比例与已压缩次数。
@@ -684,6 +824,13 @@ export type AgentStreamEvent = {
     turns?: number;
     usage?: Record<string, number>;
     error?: string;
+    // 交互澄清：ask_user 事件携带 AI 想问的问题（question）、候选答案（options，
+    // 不传为自由文本）、是否可多选（multiple，仅 options 有值时有效）以及可续跑
+    // 的完整上下文（messages，working_messages）。客户端在用户回答后把回答追加进
+    // messages 重新请求。
+    question?: string;
+    options?: string[];
+    multiple?: boolean;
     // 上下文管理信息：context_warning 事件携带占用估算与比例（平铺字段，
     // 与后端 _sse_event 下发格式一致），final 事件携带 compacted（本次运行自动压缩次数）。
     estimated_tokens?: number;
@@ -966,4 +1113,88 @@ export async function deleteTask(taskId: string): Promise<void> {
 // 立即执行一次任务（绕过调度器，不改变 last_run_at / next_run_at）
 export async function runTask(taskId: string): Promise<void> {
   await requestJson<{ ok?: boolean }>(`/v1/tasks/${encodeURIComponent(taskId)}/run`, { method: "POST" });
+}
+
+// ── 工作流（/v1/flow）类型与 API，数据结构与 ccs flow 模块一致 ──
+export type FlowNodeType = "intake" | "plan" | "code" | "review" | "test" | "fix" | "human" | "router" | "merge" | "output";
+
+export type NodeExecutor = "llm" | "pi-agent" | "human" | "none";
+
+export type WorkflowNodeData = {
+  label: string;
+  modelId: string;
+  systemPrompt: string;
+  userPromptTemplate: string;
+  executor?: NodeExecutor;
+  temperature?: number;
+  maxTokens?: number;
+  artifactKey?: string;
+};
+
+export type WorkflowNode = {
+  id: string;
+  type: FlowNodeType;
+  position: { x: number; y: number };
+  data: WorkflowNodeData;
+};
+
+export type WorkflowEdge = {
+  id: string;
+  source: string;
+  target: string;
+  condition?: string;
+  label?: string;
+  loop?: boolean;
+};
+
+export type Workflow = {
+  id: string;
+  name: string;
+  description?: string;
+  version: number;
+  nodes: WorkflowNode[];
+  edges: WorkflowEdge[];
+  variables: Record<string, string>;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type WorkflowInput = {
+  name: string;
+  description?: string;
+  nodes?: WorkflowNode[];
+  edges?: WorkflowEdge[];
+  variables?: Record<string, string>;
+};
+
+// 拉取全部工作流
+export async function listWorkflows(): Promise<Workflow[]> {
+  const payload = await requestJson<{ workflows?: Workflow[] }>("/v1/flow/workflows");
+  if (!Array.isArray(payload?.workflows)) throw new Error("工作流列表格式无效");
+  return payload.workflows;
+}
+
+// 创建工作流，成功后返回完整记录
+export async function createWorkflow(input: WorkflowInput): Promise<Workflow> {
+  const payload = await requestJson<{ workflow?: Workflow }>("/v1/flow/workflows", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+  if (!payload?.workflow) throw new Error("创建工作流失败：响应缺少 workflow");
+  return payload.workflow;
+}
+
+// 更新工作流指定字段，返回更新后的记录
+export async function updateWorkflow(workflowId: string, input: Partial<WorkflowInput>): Promise<Workflow> {
+  const payload = await requestJson<{ workflow?: Workflow }>(`/v1/flow/workflows/${encodeURIComponent(workflowId)}`, {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
+  if (!payload?.workflow) throw new Error("更新工作流失败：响应缺少 workflow");
+  return payload.workflow;
+}
+
+// 删除工作流
+export async function deleteWorkflow(workflowId: string): Promise<void> {
+  await requestJson<{ ok?: boolean }>(`/v1/flow/workflows/${encodeURIComponent(workflowId)}`, { method: "DELETE" });
 }
