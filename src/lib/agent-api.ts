@@ -189,6 +189,63 @@ const AKM_LOAD_SESSION_TOOL: AgentTool = {
   },
 };
 
+// 列出定时任务（对应后端内置 akm_list_tasks）。
+// 只读，作为基础工具始终声明；返回任务 id、名称、类型、间隔、启用状态与执行时间。
+const AKM_LIST_TASKS_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_list_tasks",
+    description: "列出已配置的定时任务（akm 后台任务系统）：返回任务 id、名称、类型（agent_call / usage_query）、间隔、启用状态与执行时间，可用 task_type 过滤类型、enabled=1 只看启用任务",
+    parameters: {
+      type: "object",
+      properties: {
+        task_type: { type: "string", description: "按任务类型过滤：agent_call 或 usage_query，留空不过滤" },
+        enabled: { type: "string", description: "传 1 时只返回启用的任务，留空返回全部" },
+      },
+      required: [],
+    },
+  },
+};
+
+// 创建定时任务（对应后端内置 akm_create_task）。
+// 非只读，作为基础工具始终声明，供 Agent 自主编排重复任务。
+const AKM_CREATE_TASK_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_create_task",
+    description: "创建一条定时任务（akm 后台任务系统）：agent_call 类型周期调用 Agent Loop 跑一轮对话（payload 需含 messages，可带 model/tools/instructions/max_turns）；usage_query 类型对指定 alias 执行用量查询脚本（payload 需含 alias）。interval_sec 为循环间隔秒数，0 表示单次执行后自动禁用；cron 为预留字段。返回创建后的完整任务记录",
+    parameters: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "任务名称" },
+        task_type: { type: "string", description: "任务类型：agent_call 或 usage_query" },
+        payload: { type: "object", description: "任务参数：agent_call 需 messages（对话历史，可带 model/tools/instructions/max_turns）；usage_query 需 alias" },
+        interval_sec: { type: "integer", description: "循环间隔秒数，0（默认）表示单次执行后自动禁用" },
+        cron: { type: "string", description: "预留字段，暂不解析" },
+        enabled: { type: "boolean", description: "是否立即启用，默认 true" },
+      },
+      required: ["name", "task_type"],
+    },
+  },
+};
+
+// 删除定时任务（对应后端内置 akm_delete_task）。
+// 非只读，作为基础工具始终声明，供 Agent 按需清理任务。
+const AKM_DELETE_TASK_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_delete_task",
+    description: "删除一条定时任务（akm 后台任务系统），按 akm_list_tasks 返回的 task_id 删除，返回是否删除成功",
+    parameters: {
+      type: "object",
+      properties: {
+        task_id: { type: "string", description: "要删除的任务 id（来自 akm_list_tasks）" },
+      },
+      required: ["task_id"],
+    },
+  },
+};
+
 // 查询 Token 用量统计（对应后端内置 akm_get_usage_stats，与 /api/stats 同源）。
 // 只读，作为基础工具始终声明；默认返回 1/7/30 天窗口，开启 cost_stats_enabled 时附带费用估算。
 const AKM_GET_USAGE_STATS_TOOL: AgentTool = {
@@ -467,6 +524,10 @@ export function resolveDeclaredTools(tools: string[]): AgentTool[] {
     AKM_LIST_PLUGINS_TOOL,
     AKM_LIST_SESSIONS_TOOL,
     AKM_LOAD_SESSION_TOOL,
+    // 定时任务工具：后端默认注入，这里始终声明，保证显式传 tools 走白名单时不被丢弃
+    AKM_LIST_TASKS_TOOL,
+    AKM_CREATE_TASK_TOOL,
+    AKM_DELETE_TASK_TOOL,
   );
   // 工作区文件工具（读 + 写）：始终声明，可用性由后端配置开关控制
   declared.push(
@@ -575,7 +636,7 @@ function createAgentRequestBody(options: {
     // 未开启任何工具时不传 tools：后端默认不注入联网搜索/图片生成/编辑工具。
     ...(options.tools?.length ? { tools: options.tools } : {}),
     api_path: "chat/completions",
-    max_turns: 20,
+    max_turns: 50,
     stream,
   });
 }
@@ -597,7 +658,7 @@ function createAgentFormData(options: {
   // 与纯 JSON 一样按白名单注入声明中列出的工具。
   if (options.tools?.length) form.append("tools", JSON.stringify(options.tools));
   form.append("api_path", "chat/completions");
-  form.append("max_turns", "20");
+  form.append("max_turns", "50");
   form.append("stream", String(stream));
   options.files.forEach(file => form.append("files", file));
   return form;
@@ -657,6 +718,9 @@ export async function* runAgentStream(options: {
   instructions: string;
   tools?: AgentTool[];
   files?: File[];
+  // 传入中断信号后，点击"停止"会 abort 该请求：前端停止读取，
+  // 后端检测到连接断开后停止生成，避免中断后继续烧 token。
+  signal?: AbortSignal;
 }): AsyncGenerator<AgentStreamEvent> {
   // 携带附件时改用 multipart/form-data，否则保持纯 JSON。
   const hasFiles = Boolean(options.files?.length);
@@ -668,6 +732,7 @@ export async function* runAgentStream(options: {
     method: "POST",
     headers,
     body: hasFiles ? createAgentFormData({ ...options, files: options.files! }, true) : createAgentRequestBody(options, true),
+    signal: options.signal,
   });
 
   if (!response.ok) {
@@ -709,4 +774,87 @@ export async function* runAgentStream(options: {
   } finally {
     reader.releaseLock();
   }
+}
+
+// ---- 定时任务（/v1/tasks）----
+
+// 任务类型：agent_call 定时调用 Agent 完成一轮对话，usage_query 定时执行用量查询
+export type TaskType = "agent_call" | "usage_query";
+
+// 任务 payload：按类型携带不同字段；调度器执行后会把结果摘要写回
+// last_result / last_result_time（usage_query 的结果写入 usage_data，不在 payload）
+export type TaskPayload = {
+  model?: string;
+  messages?: AgentMessage[];
+  tools?: AgentTool[];
+  instructions?: string;
+  max_turns?: number;
+  api_path?: string;
+  workspace_root?: string;
+  alias?: string;
+  last_result?: { ok: boolean; final_message?: string } | null;
+  last_result_time?: string | null;
+  [key: string]: unknown;
+};
+
+// 一条定时任务记录（对应后端 scheduled_tasks 表）
+export type ScheduledTask = {
+  id: string;
+  name: string;
+  task_type: TaskType;
+  interval_sec: number;
+  cron?: string | null;
+  payload: TaskPayload;
+  enabled: boolean;
+  last_run_at?: string | null;
+  next_run_at?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+// 创建 / 更新任务的入参（字段与后端 /v1/tasks 路由保持一致）
+export type TaskInput = {
+  name: string;
+  task_type: TaskType;
+  interval_sec: number;
+  cron?: string;
+  enabled?: boolean;
+  payload?: Record<string, unknown>;
+};
+
+// 拉取全部定时任务，按创建时间倒序返回
+export async function listTasks(): Promise<ScheduledTask[]> {
+  const payload = await requestJson<{ tasks?: ScheduledTask[] }>("/v1/tasks");
+  if (!Array.isArray(payload?.tasks)) throw new Error("任务列表格式无效");
+  return payload.tasks;
+}
+
+// 创建一条定时任务，成功后返回完整记录
+export async function createTask(input: TaskInput): Promise<ScheduledTask> {
+  const payload = await requestJson<{ task?: ScheduledTask }>("/v1/tasks", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+  if (!payload?.task) throw new Error("创建任务失败：响应缺少 task");
+  return payload.task;
+}
+
+// 更新任务的指定字段，返回更新后的记录
+export async function updateTask(taskId: string, input: Partial<TaskInput>): Promise<ScheduledTask> {
+  const payload = await requestJson<{ task?: ScheduledTask }>(`/v1/tasks/${encodeURIComponent(taskId)}`, {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
+  if (!payload?.task) throw new Error("更新任务失败：响应缺少 task");
+  return payload.task;
+}
+
+// 删除一条定时任务
+export async function deleteTask(taskId: string): Promise<void> {
+  await requestJson<{ ok?: boolean }>(`/v1/tasks/${encodeURIComponent(taskId)}`, { method: "DELETE" });
+}
+
+// 立即执行一次任务（绕过调度器，不改变 last_run_at / next_run_at）
+export async function runTask(taskId: string): Promise<void> {
+  await requestJson<{ ok?: boolean }>(`/v1/tasks/${encodeURIComponent(taskId)}/run`, { method: "POST" });
 }
