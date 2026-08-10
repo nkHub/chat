@@ -267,6 +267,86 @@ const AKM_SEND_NOTIFICATION_TOOL: AgentTool = {
   },
 };
 
+// 读取 macOS 系统剪贴板（对应后端内置 akm_clipboard_get，agent_native_tools_enabled 默认开启才注册）。
+// 只读，作为基础工具始终声明；超 100000 字符截断并标记 truncated，不产生网络流量。
+const AKM_CLIPBOARD_GET_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_clipboard_get",
+    description: "读取本机 macOS 系统剪贴板纯文本内容，返回内容与长度（超 100000 字符截断并标记 truncated）。只读本机剪贴板，不产生网络流量",
+    parameters: {
+      type: "object",
+      properties: {},
+      required: [],
+    },
+  },
+};
+
+// 写入 macOS 系统剪贴板（对应后端内置 akm_clipboard_set）。
+// 非只读，作为基础工具始终声明；会覆盖用户当前剪贴板，适合把模型生成的文本交给用户直接粘贴。
+const AKM_CLIPBOARD_SET_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_clipboard_set",
+    description: "把纯文本写入本机 macOS 系统剪贴板，替换当前内容（会覆盖用户当前剪贴板，请确认模型意图后再调用）",
+    parameters: {
+      type: "object",
+      properties: {
+        content: { type: "string", description: "要写入剪贴板的纯文本内容" },
+      },
+      required: ["content"],
+    },
+  },
+};
+
+// 采集本机只读系统信息（对应后端内置 akm_system_info）。
+// 只读，作为基础工具始终声明；返回 macOS 版本、架构、CPU、内存、主机名、Python 版本与服务器时间。
+const AKM_SYSTEM_INFO_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_system_info",
+    description: "采集本机只读系统信息：macOS 版本、架构、CPU 型号与核数、内存、主机名、Python 版本、服务器时间。只读无副作用",
+    parameters: {
+      type: "object",
+      properties: {},
+      required: [],
+    },
+  },
+};
+
+// 打开本机资源（对应后端内置 akm_open）。
+// 非只读，作为基础工具始终声明；仅放行 http/https URL、工作区内文件与已安装应用名，后端做安全校验。
+const AKM_OPEN_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_open",
+    description: "打开本机资源：URL（仅限 http/https）、工作区内文件或已安装应用。kind 为 url/path/app，默认 url；path 必须位于工作区内，app 只接受应用名",
+    parameters: {
+      type: "object",
+      properties: {
+        kind: { type: "string", enum: ["url", "path", "app"], description: "打开类型，默认 url" },
+        target: { type: "string", description: "目标：http/https URL、工作区内文件路径或应用名" },
+      },
+      required: ["target"],
+    },
+  },
+};
+
+// 查询本机当前前台应用（对应后端内置 akm_frontmost_app）。
+// 只读，作为基础工具始终声明；返回应用名、Bundle ID 与进程号，无前台应用时 app 为 null。
+const AKM_FRONTMOST_APP_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_frontmost_app",
+    description: "返回本机当前前台应用的名称、Bundle ID 与进程号（只读）；无前台应用（无活跃 GUI 会话）时 app 为 null",
+    parameters: {
+      type: "object",
+      properties: {},
+      required: [],
+    },
+  },
+};
+
 // 查询 Token 用量统计（对应后端内置 akm_get_usage_stats，与 /api/stats 同源）。
 // 只读，作为基础工具始终声明；默认返回 1/7/30 天窗口，开启 cost_stats_enabled 时附带费用估算。
 const AKM_GET_USAGE_STATS_TOOL: AgentTool = {
@@ -551,6 +631,12 @@ export function resolveDeclaredTools(tools: string[]): AgentTool[] {
     AKM_DELETE_TASK_TOOL,
     // 原生通知工具：后端默认注入（agent_notify_enabled 开启），这里始终声明，避免白名单时丢失
     AKM_SEND_NOTIFICATION_TOOL,
+    // 原生系统工具：后端默认注入（agent_native_tools_enabled 开启），这里始终声明，避免白名单时丢失
+    AKM_CLIPBOARD_GET_TOOL,
+    AKM_CLIPBOARD_SET_TOOL,
+    AKM_SYSTEM_INFO_TOOL,
+    AKM_OPEN_TOOL,
+    AKM_FRONTMOST_APP_TOOL,
   );
   // 工作区文件工具（读 + 写）：始终声明，可用性由后端配置开关控制
   declared.push(
