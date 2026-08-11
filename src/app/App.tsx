@@ -1159,6 +1159,17 @@ function ChatPage({
     [messages],
   );
 
+  // 有聊天内容时拦截刷新/关闭：浏览器弹出原生确认框，防止聊天聊一半被手滑刷新刷断。
+  useEffect(() => {
+    if (messages.length === 0) return;
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [messages.length]);
+
   // 新消息到达或流式内容增长时，仅在吸附状态下自动滚动到底部；用户上翻阅读历史时不打扰。
   useEffect(() => {
     if (!stickToBottom) return;
