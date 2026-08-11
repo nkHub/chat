@@ -169,6 +169,15 @@ const THEMES: ThemePreset[] = [
   { key: "slate", label: "石墨", primary: "#334155", secondary: "#f1f5f9", accent: "#e2e8f0", dark: { primary: "#64748b", secondary: "oklch(0.29 0.01 250)", accent: "oklch(0.34 0.01 250)" } },
 ];
 
+// 主题设置上下文：把外观/主题色状态提到全局，右上角设置入口（ThemeSettingsPopover）
+// 可直接取用，避免给每个页面组件逐层传递 theme 相关 props。
+const ThemeContext = createContext<{
+  activeTheme: string;
+  onThemeChange: (theme: ThemePreset) => void;
+  themeMode: ThemeMode;
+  onThemeModeChange: (mode: ThemeMode) => void;
+} | null>(null);
+
 const QUICK_PROMPTS = [
   { icon: Brain, label: "技术答疑", prompt: "帮我解释一下这段代码的含义和潜在问题。" },
   { icon: Zap, label: "效率提升", prompt: "帮我优化以下工作流程，让它更高效。" },
@@ -235,10 +244,11 @@ type CanvasNode = Node<WorkflowNodeData & { nodeType: FlowNodeType }>;
 type CanvasEdge = Edge<{ condition?: string; loop?: boolean }>;
 
 // WorkflowNode[] → 画布节点[]：把 type 合并进 data.nodeType。
+// position 缺失（旧数据或后端未返回）时兜底为原点，避免 ReactFlow 读取 position.x 白屏。
 function toCanvasNodes(nodes: WorkflowNode[]): CanvasNode[] {
   return nodes.map(node => ({
     id: node.id,
-    position: node.position,
+    position: node.position ?? { x: 0, y: 0 },
     type: "flowNode",
     data: { ...node.data, nodeType: node.type },
   }));
@@ -725,6 +735,26 @@ function StatusNotice({ status, error, onRetry }: { status: "send_failed" | "rec
   );
 }
 
+// 右上角设置入口：外观模式（跟随系统/浅色/深色）与主题色选择。
+// 原位于侧栏底部，随用户区移除后挪到主界面头部右上角；主题状态来自全局 ThemeContext。
+function ThemeSettingsPopover() {
+  const theme = useContext(ThemeContext);
+  if (!theme) return null;
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <Button variant="ghost" size="icon-sm" className="h-7 w-7 text-foreground/40 hover:bg-black/[0.06] hover:text-foreground/70 dark:hover:bg-white/10"><Settings size={13} /></Button>
+      </PopoverTrigger>
+      <PopoverContent side="bottom" align="end" sideOffset={8} className="w-72 p-3">
+        <p className="mb-2 text-xs font-semibold text-foreground">外观</p>
+        <div className="mb-3 grid grid-cols-3 gap-1 rounded-lg bg-muted p-1">{THEME_MODES.map(({ key, label, icon: Icon }) => <button key={key} type="button" onClick={() => theme.onThemeModeChange(key)} className={cn("flex items-center justify-center gap-1 rounded-md px-1 py-1.5 text-xs transition-colors", theme.themeMode === key ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground")}><Icon size={12} /><span>{label}</span></button>)}</div>
+        <p className="mb-2.5 text-xs font-semibold text-foreground">主题色</p>
+        <div className="grid grid-cols-3 gap-2">{THEMES.map(themePreset => <button key={themePreset.key} type="button" onClick={() => theme.onThemeChange(themePreset)} className={cn("flex flex-col items-center gap-1.5 rounded-lg border px-2 py-2 transition-all hover:bg-muted", theme.activeTheme === themePreset.key ? "border-primary bg-primary/5" : "border-border")}><span className="h-5 w-5 rounded-full" style={{ background: themePreset.primary, boxShadow: theme.activeTheme === themePreset.key ? `0 0 0 2px white, 0 0 0 4px ${themePreset.primary}` : "none" }} /><span className="text-xs leading-none text-muted-foreground">{themePreset.label}</span></button>)}</div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 function Sidebar({
   open,
   activePage,
@@ -739,10 +769,6 @@ function Sidebar({
   onCloseEdit,
   onDeleteSession,
   onReorderSessions,
-  activeTheme,
-  onThemeChange,
-  themeMode,
-  onThemeModeChange,
   onClose,
 }: {
   open: boolean;
@@ -758,10 +784,6 @@ function Sidebar({
   onCloseEdit: () => void;
   onDeleteSession: (id: string) => void;
   onReorderSessions: (fromId: string, toId: string) => void;
-  activeTheme: string;
-  onThemeChange: (theme: ThemePreset) => void;
-  themeMode: ThemeMode;
-  onThemeModeChange: (mode: ThemeMode) => void;
   onClose: () => void;
 }) {
   const [editValue, setEditValue] = useState("");
@@ -840,10 +862,6 @@ function Sidebar({
               </ContextMenu>
             ))}
           </ScrollArea>
-          <div className="flex items-center justify-between border-t border-black/[0.06] px-3 py-3">
-            <div className="flex items-center gap-2"><Avatar className="h-7 w-7"><AvatarFallback className="bg-primary text-xs font-bold text-primary-foreground">测</AvatarFallback></Avatar><div><p className="text-sm font-medium leading-tight text-foreground">测试</p></div></div>
-            <Popover><PopoverTrigger asChild><Button variant="ghost" size="icon-sm" className="h-7 w-7 text-foreground/40 hover:bg-black/[0.06] hover:text-foreground/70 dark:hover:bg-white/10"><Settings size={13} /></Button></PopoverTrigger><PopoverContent side="right" align="end" sideOffset={10} className="w-72 p-3"><p className="mb-2 text-xs font-semibold text-foreground">外观</p><div className="mb-3 grid grid-cols-3 gap-1 rounded-lg bg-muted p-1">{THEME_MODES.map(({ key, label, icon: Icon }) => <button key={key} type="button" onClick={() => onThemeModeChange(key)} className={cn("flex items-center justify-center gap-1 rounded-md px-1 py-1.5 text-xs transition-colors", themeMode === key ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground")}><Icon size={12} /><span>{label}</span></button>)}</div><p className="mb-2.5 text-xs font-semibold text-foreground">主题色</p><div className="grid grid-cols-3 gap-2">{THEMES.map(theme => <button key={theme.key} type="button" onClick={() => onThemeChange(theme)} className={cn("flex flex-col items-center gap-1.5 rounded-lg border px-2 py-2 transition-all hover:bg-muted", activeTheme === theme.key ? "border-primary bg-primary/5" : "border-border")}><span className="h-5 w-5 rounded-full" style={{ background: theme.primary, boxShadow: activeTheme === theme.key ? `0 0 0 2px white, 0 0 0 4px ${theme.primary}` : "none" }} /><span className="text-xs leading-none text-muted-foreground">{theme.label}</span></button>)}</div></PopoverContent></Popover>
-          </div>
         </div>
       </aside>
       <Dialog
@@ -877,7 +895,7 @@ function Sidebar({
 }
 
 function PageHeader({ title, subtitle, sidebarOpen, onToggle }: { title: string; subtitle: string; sidebarOpen: boolean; onToggle: () => void }) {
-  return <header className="flex shrink-0 items-center gap-2 border-b border-black/[0.06] bg-white px-4 py-3 dark:border-border dark:bg-card"><Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon-sm" className="h-7 w-7 text-foreground/40 hover:text-foreground/70" onClick={onToggle}>{sidebarOpen ? <PanelLeftClose size={15} /> : <PanelLeftOpen size={15} />}</Button></TooltipTrigger><TooltipContent>{sidebarOpen ? "收起侧栏" : "展开侧栏"}</TooltipContent></Tooltip><div><h1 className="text-sm font-semibold leading-tight text-foreground">{title}</h1><p className="mt-0.5 text-xs text-muted-foreground">{subtitle}</p></div></header>;
+  return <header className="flex shrink-0 items-center gap-2 border-b border-black/[0.06] bg-white px-4 py-3 dark:border-border dark:bg-card"><Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon-sm" className="h-7 w-7 text-foreground/40 hover:text-foreground/70" onClick={onToggle}>{sidebarOpen ? <PanelLeftClose size={15} /> : <PanelLeftOpen size={15} />}</Button></TooltipTrigger><TooltipContent>{sidebarOpen ? "收起侧栏" : "展开侧栏"}</TooltipContent></Tooltip><div><h1 className="text-sm font-semibold leading-tight text-foreground">{title}</h1><p className="mt-0.5 text-xs text-muted-foreground">{subtitle}</p></div><div className="ml-auto"><ThemeSettingsPopover /></div></header>;
 }
 
 function EmptyChat({ onPrompt }: { onPrompt: (prompt: string) => void }) {
@@ -1170,6 +1188,8 @@ function ChatPage({
     // 回复未完成时不允许再发；空内容同样拦截
     if (isReplyPending || (!input.trim() && !attachments.length)) return;
     onSend(input.trim() || attachments.map(file => file.name).join(", "), attachments, tools);
+    // 发送新消息即重新吸附到底部：即使用户此前上翻阅读历史，也应回到最新消息。
+    setStickToBottom(true);
     setInput("");
     setAttachments([]);
     if (textareaRef.current) textareaRef.current.style.height = "44px";
@@ -1177,10 +1197,11 @@ function ChatPage({
 
   return <div className="flex min-h-0 flex-1 flex-col">
     <header className="flex shrink-0 items-center justify-start border-b border-black/[0.06] bg-white px-4 py-3 dark:border-border dark:bg-card">
-      <div className="flex items-center gap-2">
-        <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon-sm" className="h-7 w-7 text-foreground/40 hover:text-foreground/70" onClick={onToggleSidebar}>{sidebarOpen ? <PanelLeftClose size={15} /> : <PanelLeftOpen size={15} />}</Button></TooltipTrigger><TooltipContent>{sidebarOpen ? "收起侧栏" : "展开侧栏"}</TooltipContent></Tooltip>
-        <div><h1 className="text-sm font-semibold leading-tight text-foreground">{session?.title ?? "新对话"}</h1><p className="mt-0.5 text-xs text-muted-foreground">{messages.length} 条消息 · {modelLabel}</p></div>
-      </div>
+        <div className="flex items-center gap-2">
+          <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon-sm" className="h-7 w-7 text-foreground/40 hover:text-foreground/70" onClick={onToggleSidebar}>{sidebarOpen ? <PanelLeftClose size={15} /> : <PanelLeftOpen size={15} />}</Button></TooltipTrigger><TooltipContent>{sidebarOpen ? "收起侧栏" : "展开侧栏"}</TooltipContent></Tooltip>
+          <div><h1 className="text-sm font-semibold leading-tight text-foreground">{session?.title ?? "新对话"}</h1><p className="mt-0.5 text-xs text-muted-foreground">{messages.length} 条消息 · {modelLabel}</p></div>
+        </div>
+        <div className="ml-auto"><ThemeSettingsPopover /></div>
     </header>
         <ScrollArea viewportRef={viewportRef} className="min-h-0 flex-1 bg-white dark:bg-card">
       <div className="mx-auto max-w-4xl space-y-6 px-4 py-6 sm:px-6">
@@ -2831,7 +2852,7 @@ export default function App() {
 
   return (
     <PreviewContext.Provider value={{ openPreview: setPreviewUrl }}>
-      <TooltipProvider delayDuration={400}><div className="flex h-screen w-full overflow-hidden bg-background" style={{ fontFamily: "Inter, system-ui, sans-serif" }}><Sidebar open={sidebarOpen} activePage={activePage} sessions={displaySessions} activeSession={activeSession} editingId={editingId} onPageChange={setActivePage} onNewSession={newSession} onSessionChange={id => { setActiveSession(id); setActivePage("chat"); const target = sessions.find(session => session.id === id); if (target?.modelKey) { const savedModel = models.find(model => model.key === target.modelKey); if (savedModel) setSelectedModel(savedModel); } }} onStartEdit={startEdit} onSaveEdit={saveEdit} onCloseEdit={() => setEditingId(null)} onDeleteSession={id => setDeleteSessionTarget(sessions.find(session => session.id === id) ?? null)} onReorderSessions={reorderSessions} activeTheme={activeTheme} onThemeChange={changeTheme} themeMode={themeMode} onThemeModeChange={changeThemeMode} onClose={() => setSidebarOpen(false)} /><main className="flex min-w-0 flex-1 flex-col overflow-hidden">{content}</main></div></TooltipProvider>
+      <TooltipProvider delayDuration={400}><ThemeContext.Provider value={{ activeTheme, onThemeChange: changeTheme, themeMode, onThemeModeChange: changeThemeMode }}><div className="flex h-screen w-full overflow-hidden bg-background" style={{ fontFamily: "Inter, system-ui, sans-serif" }}><Sidebar open={sidebarOpen} activePage={activePage} sessions={displaySessions} activeSession={activeSession} editingId={editingId} onPageChange={setActivePage} onNewSession={newSession} onSessionChange={id => { setActiveSession(id); setActivePage("chat"); const target = sessions.find(session => session.id === id); if (target?.modelKey) { const savedModel = models.find(model => model.key === target.modelKey); if (savedModel) setSelectedModel(savedModel); } }} onStartEdit={startEdit} onSaveEdit={saveEdit} onCloseEdit={() => setEditingId(null)} onDeleteSession={id => setDeleteSessionTarget(sessions.find(session => session.id === id) ?? null)} onReorderSessions={reorderSessions} onClose={() => setSidebarOpen(false)} /><main className="flex min-w-0 flex-1 flex-col overflow-hidden">{content}</main></div></ThemeContext.Provider></TooltipProvider>
       <Dialog open={deleteSessionTarget !== null} onOpenChange={open => { if (!open) closeDeleteSessionDialog(); }}>
         <DialogContent>
           <DialogHeader>
