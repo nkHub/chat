@@ -942,7 +942,7 @@ export async function runAgent(options: {
 }
 
 function isAgentStreamEventName(value: unknown): value is AgentStreamEventName {
-  return value === "reasoning_delta" || value === "model_delta" || value === "turn_start" || value === "tool_call" || value === "tool_result" || value === "context_warning" || value === "final" || value === "error";
+  return value === "reasoning_delta" || value === "model_delta" || value === "turn_start" || value === "tool_call" || value === "tool_result" || value === "context_warning" || value === "ask_user" || value === "final" || value === "error";
 }
 
 function parseAgentStreamFrame(frame: string): AgentStreamEvent | null {
@@ -1197,4 +1197,20 @@ export async function updateWorkflow(workflowId: string, input: Partial<Workflow
 // 删除工作流
 export async function deleteWorkflow(workflowId: string): Promise<void> {
   await requestJson<{ ok?: boolean }>(`/v1/flow/workflows/${encodeURIComponent(workflowId)}`, { method: "DELETE" });
+}
+
+// 拉取内置工作流模板（后端返回不含 id 的模板定义，实例化时重新生成 id）
+export async function listFlowTemplates(): Promise<Workflow[]> {
+  const payload = await requestJson<{ templates?: Workflow[] }>("/v1/flow/templates");
+  if (!Array.isArray(payload?.templates)) throw new Error("工作流模板列表格式无效");
+  return payload.templates;
+}
+
+// 实例化模板：按模板名（或 id）匹配，保存为真实工作流并返回完整记录
+export async function instantiateFlowTemplate(templateId: string): Promise<Workflow> {
+  const payload = await requestJson<{ workflow?: Workflow }>(`/v1/flow/templates/${encodeURIComponent(templateId)}/instantiate`, {
+    method: "POST",
+  });
+  if (!payload?.workflow) throw new Error("实例化模板失败：响应缺少 workflow");
+  return payload.workflow;
 }

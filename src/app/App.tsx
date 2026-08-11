@@ -61,7 +61,9 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import { fetchModels, runAgent, runAgentStream, resolveDeclaredTools, listTasks, createTask, updateTask, deleteTask, runTask, listWorkflows, createWorkflow, updateWorkflow, deleteWorkflow, API_BASE_URL, type AgentMessage, type ApiModel, type ContextWarning, type ScheduledTask, type TaskPayload, type TaskType, type FlowNodeType, type NodeExecutor, type Workflow, type WorkflowEdge, type WorkflowNode, type WorkflowNodeData } from "@/lib/agent-api";
+import { Background, BackgroundVariant, Controls, Handle, Position, ReactFlow, addEdge, useEdgesState, useNodesState, type Connection, type Edge, type Node, type NodeProps, type NodeTypes } from "@xyflow/react";
+import "@xyflow/react/dist/style.css";
+import { fetchModels, runAgent, runAgentStream, resolveDeclaredTools, listTasks, createTask, updateTask, deleteTask, runTask, listWorkflows, createWorkflow, updateWorkflow, deleteWorkflow, listFlowTemplates, instantiateFlowTemplate, API_BASE_URL, type AgentMessage, type ApiModel, type ContextWarning, type ScheduledTask, type TaskPayload, type TaskType, type FlowNodeType, type NodeExecutor, type Workflow, type WorkflowEdge, type WorkflowNode, type WorkflowNodeData } from "@/lib/agent-api";
 import { loadChatState, saveChatState } from "@/lib/chat-store";
 
 type ThemePreset = {
@@ -225,6 +227,71 @@ function buildFlowEdges(nodes: WorkflowNode[]): WorkflowEdge[] {
 function demoNode(id: string, type: FlowNodeType, label: string, data: Partial<WorkflowNodeData> = {}): WorkflowNode {
   return { id, type, position: { x: 0, y: 0 }, data: { label, modelId: "", systemPrompt: "", userPromptTemplate: "", ...data } };
 }
+
+// ---- 工作流可视化编辑器（@xyflow/react）辅助类型与组件 ----
+// 画布节点：在 WorkflowNodeData 基础上合并 nodeType，供自定义节点渲染出类型色点/徽章。
+type CanvasNode = Node<WorkflowNodeData & { nodeType: FlowNodeType }>;
+// 画布边：condition/loop 等业务字段放在 data 里（React Flow 的边也支持 data）。
+type CanvasEdge = Edge<{ condition?: string; loop?: boolean }>;
+
+// WorkflowNode[] → 画布节点[]：把 type 合并进 data.nodeType。
+function toCanvasNodes(nodes: WorkflowNode[]): CanvasNode[] {
+  return nodes.map(node => ({
+    id: node.id,
+    position: node.position,
+    type: "flowNode",
+    data: { ...node.data, nodeType: node.type },
+  }));
+}
+
+// 画布节点[] → WorkflowNode[]：从 data 解构回 type，其余字段作为节点数据。
+function toWorkflowNodes(canvasNodes: CanvasNode[]): WorkflowNode[] {
+  return canvasNodes.map(node => {
+    const { nodeType, ...data } = node.data;
+    return { id: node.id, type: nodeType, position: node.position, data };
+  });
+}
+
+// 画布边[] → WorkflowEdge[]：取出 data 里的 condition/loop 业务字段，label 若为空不写入。
+function toWorkflowEdges(edges: CanvasEdge[]): WorkflowEdge[] {
+  return edges.map(edge => ({
+    id: edge.id,
+    source: edge.source,
+    target: edge.target,
+    ...(typeof edge.label === "string" && edge.label ? { label: edge.label } : {}),
+    ...(edge.data?.condition ? { condition: edge.data.condition } : {}),
+    ...(edge.data?.loop ? { loop: true } : {}),
+  }));
+}
+
+// 自定义画布节点：色点 + 名称 + 类型徽章 + 执行器徽章 + 模型名截断 + 左右连接点。
+// 参考 flow 项目的 FlowNode 组件，配色适配本项目的浅色主题。
+const WorkflowCanvasNode = memo(({ data, selected }: NodeProps<CanvasNode>) => {
+  const meta = NODE_META[data.nodeType];
+  const executorShort: Partial<Record<NodeExecutor, string>> = { "pi-agent": "Pi", human: "人工", none: "透传" };
+  const executorText = data.executor ? (executorShort[data.executor] ?? "LLM") : "LLM";
+  return (
+    <div className={cn(
+      "min-w-[180px] max-w-[240px] rounded-xl border bg-card px-3 py-2 shadow-sm transition-shadow",
+      selected ? "border-primary ring-2 ring-primary/30" : "border-border",
+    )}>
+      <Handle type="target" position={Position.Left} className="!h-2 !w-2 !border-0 !bg-muted-foreground" />
+      <div className="flex items-center gap-1.5">
+        <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: meta.color }} />
+        <span className="min-w-0 flex-1 truncate text-xs font-semibold text-foreground">{data.label || meta.label}</span>
+      </div>
+      <div className="mt-1.5 flex items-center gap-1">
+        <span className="rounded bg-muted px-1 py-px text-[10px] font-medium text-muted-foreground">{meta.label}</span>
+        <span className="rounded bg-muted px-1 py-px text-[10px] text-muted-foreground">{executorText}</span>
+        {data.modelId ? <span className="min-w-0 flex-1 truncate text-right text-[10px] text-muted-foreground/70">{data.modelId}</span> : null}
+      </div>
+      <Handle type="source" position={Position.Right} className="!h-2 !w-2 !border-0 !bg-muted-foreground" />
+    </div>
+  );
+});
+
+// React Flow 自定义节点注册表：flowNode 用于渲染业务节点。
+const workflowNodeTypes: NodeTypes = { flowNode: WorkflowCanvasNode };
 
 // 规范化从存储层读出的聊天状态：
 // 迁移旧数据：会话时间跟随最后一条消息的时间（空会话保留创建时间），
@@ -1510,7 +1577,11 @@ function AutomationPage({ sidebarOpen, onToggle, models, defaultModelKey }: { si
               <>
                 <div>
                   <label className="mb-1 block text-xs font-medium text-foreground/70">执行模型</label>
-                  <ModelSettingsPopover model={models.find(item => item.key === modelKey) ?? null} models={models} modelsLoading={false} modelsError={null} onModelChange={item => setModelKey(item.key)} onReloadModels={() => {}} />
+                  {/* 用原生 select 而非 Popover：modal Dialog 内嵌 Popover 存在点击选项被拦截的问题 */}
+                  <select value={modelKey} onChange={event => setModelKey(event.target.value)} className="w-full rounded-lg border bg-background px-3 py-2 text-sm outline-none focus:border-primary/60">
+                    <option value="">默认模型</option>
+                    {models.map(model => <option key={model.key} value={model.key}>{model.label}</option>)}
+                  </select>
                 </div>
                 <div>
                   <label className="mb-1 block text-xs font-medium text-foreground/70">任务内容（发给模型的消息）</label>
@@ -1570,6 +1641,273 @@ function AutomationPage({ sidebarOpen, onToggle, models, defaultModelKey }: { si
 
 // 工作流页面：展示工作流列表，支持新建/编辑（弹窗内配置节点参数，字段组织参考 flow 配置页）、删除。
 // 当前使用本地假数据（DEFAULT_WORKFLOWS），后续 ccs /v1/flow 稳定后切换到真实 API。
+// 工作流可视化编辑器（三栏）：左侧节点库、中间 ReactFlow 画布（拖拽/连线/缩放）、
+// 右侧属性面板（节点/边/工作流级参数）。整体参考 flow 项目的 StudioPage。
+function WorkflowEditor({ models, initial, onCancel, onSave }: {
+  models: ChatModel[];
+  initial: { mode: "new" } | { mode: "edit"; workflow: Workflow };
+  onCancel: () => void;
+  onSave: (name: string, description: string, nodes: WorkflowNode[], edges: WorkflowEdge[], variables: Record<string, string>) => Promise<void>;
+}) {
+  const [name, setName] = useState(initial.mode === "edit" ? initial.workflow.name : "");
+  const [description, setDescription] = useState(initial.mode === "edit" ? (initial.workflow.description ?? "") : "");
+  const [variables, setVariables] = useState<Record<string, string>>(initial.mode === "edit" ? { ...initial.workflow.variables } : {});
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
+
+  // 初始画布：编辑模式用现有定义；新建模式预置"输入 → 规划 → 输出"并水平排布。
+  const initialCanvasNodes = useMemo<CanvasNode[]>(() => {
+    if (initial.mode === "edit") return toCanvasNodes(initial.workflow.nodes);
+    const now = Date.now();
+    const nodes: WorkflowNode[] = [
+      demoNode(`wfnode-${now}-1`, "intake", NODE_META.intake.label, { userPromptTemplate: "{{input.prompt}}", executor: "none" }),
+      demoNode(`wfnode-${now}-2`, "plan", NODE_META.plan.label, { executor: "llm", temperature: 0.3, maxTokens: 2000 }),
+      demoNode(`wfnode-${now}-3`, "output", NODE_META.output.label, { executor: "none" }),
+    ];
+    return toCanvasNodes(nodes.map((node, index) => ({ ...node, position: { x: index * 260, y: 0 } })));
+  }, [initial]);
+
+  const initialCanvasEdges = useMemo<CanvasEdge[]>(() => {
+    if (initial.mode === "edit") {
+      return (initial.workflow.edges ?? []).map(edge => ({
+        id: edge.id,
+        source: edge.source,
+        target: edge.target,
+        ...(edge.label ? { label: edge.label } : {}),
+        ...(edge.condition || edge.loop ? { data: { condition: edge.condition, loop: edge.loop } } : {}),
+      }));
+    }
+    // 新建模式：预置的 intake→plan→output 起始链自动连线（与旧弹窗行为一致）。
+    const now = Date.now();
+    const nodes: WorkflowNode[] = [
+      demoNode(`wfnode-${now}-1`, "intake", NODE_META.intake.label, { userPromptTemplate: "{{input.prompt}}", executor: "none" }),
+      demoNode(`wfnode-${now}-2`, "plan", NODE_META.plan.label, { executor: "llm", temperature: 0.3, maxTokens: 2000 }),
+      demoNode(`wfnode-${now}-3`, "output", NODE_META.output.label, { executor: "none" }),
+    ];
+    return buildFlowEdges(nodes).map(edge => ({ id: edge.id, source: edge.source, target: edge.target }));
+  }, [initial]);
+
+  const [rfNodes, setRfNodes, onNodesChange] = useNodesState<CanvasNode>(initialCanvasNodes);
+  const [rfEdges, setRfEdges, onEdgesChange] = useEdgesState<CanvasEdge>(initialCanvasEdges);
+
+  const selectedNode = rfNodes.find(node => node.id === selectedNodeId) ?? null;
+  const selectedEdge = rfEdges.find(edge => edge.id === selectedEdgeId) ?? null;
+
+  // 连线：新增边时补一个稳定 id，避免 React Flow 的占位 id 导致 key 不稳定。
+  const onConnect = (connection: Connection) => {
+    setRfEdges(edges => addEdge({ ...connection, id: `edge-${Date.now()}` }, edges));
+  };
+
+  // 更新选中节点的 data 字段。
+  const patchNode = (patch: Partial<WorkflowNodeData>) => {
+    if (!selectedNodeId) return;
+    setRfNodes(nodes => nodes.map(node => node.id === selectedNodeId ? { ...node, data: { ...node.data, ...patch } } : node));
+  };
+
+  // 修改选中节点的类型（data.nodeType）。
+  const changeNodeType = (type: FlowNodeType) => {
+    if (!selectedNodeId) return;
+    setRfNodes(nodes => nodes.map(node => node.id === selectedNodeId ? { ...node, data: { ...node.data, nodeType: type } } : node));
+  };
+
+  // 从节点库点击添加：放在画布内错落位置，避免与新节点完全重叠。
+  const addNode = (type: FlowNodeType) => {
+    const id = `wfnode-${Date.now()}-${rfNodes.length + 1}`;
+    const canvas = toCanvasNodes([demoNode(id, type, NODE_META[type].label, { executor: type === "human" ? "human" : "llm" })])[0];
+    setRfNodes(nodes => [...nodes, { ...canvas, position: { x: 80 + (nodes.length % 6) * 48, y: 60 + Math.floor(nodes.length / 6) * 48 } }]);
+    setSelectedNodeId(id);
+    setSelectedEdgeId(null);
+  };
+
+  const removeSelectedNode = () => {
+    if (!selectedNodeId) return;
+    setRfNodes(nodes => nodes.filter(node => node.id !== selectedNodeId));
+    setRfEdges(edges => edges.filter(edge => edge.source !== selectedNodeId && edge.target !== selectedNodeId));
+    setSelectedNodeId(null);
+  };
+
+  // 更新选中边的 label 与 data（condition/loop）。
+  const patchEdge = (patch: { label?: string; condition?: string; loop?: boolean }) => {
+    if (!selectedEdgeId) return;
+    setRfEdges(edges => edges.map(edge => {
+      if (edge.id !== selectedEdgeId) return edge;
+      const next: CanvasEdge = { ...edge };
+      if (patch.label !== undefined) next.label = patch.label;
+      const data = { ...(edge.data ?? {}) };
+      if (patch.condition !== undefined) data.condition = patch.condition || undefined;
+      if (patch.loop !== undefined) data.loop = patch.loop;
+      next.data = data;
+      return next;
+    }));
+  };
+
+  const removeSelectedEdge = () => {
+    if (!selectedEdgeId) return;
+    setRfEdges(edges => edges.filter(edge => edge.id !== selectedEdgeId));
+    setSelectedEdgeId(null);
+  };
+
+  const submit = async () => {
+    const trimmedName = name.trim();
+    if (!trimmedName || rfNodes.length === 0 || saving) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await onSave(trimmedName, description.trim(), toWorkflowNodes(rfNodes), toWorkflowEdges(rfEdges), variables);
+      onCancel();
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "保存工作流失败");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const selectClass = "w-full rounded-lg border bg-background px-3 py-2 text-sm outline-none focus:border-primary/60";
+  const labelClass = "mb-1 block text-xs font-medium text-foreground/80";
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      {/* 顶部工具条：返回 / 名称 / 错误提示 / 保存 */}
+      <div className="flex shrink-0 items-center gap-3 border-b border-black/[0.06] bg-white px-4 py-2.5 dark:border-border dark:bg-card">
+        <Button variant="ghost" size="sm" className="gap-1 text-xs" onClick={onCancel}><ChevronLeft size={14} />返回</Button>
+        <input value={name} onChange={event => setName(event.target.value)} placeholder="工作流名称" className="w-56 rounded-lg border bg-background px-3 py-1.5 text-sm outline-none focus:border-primary/60" />
+        {error ? <span className="min-w-0 flex-1 truncate text-xs text-destructive">{error}</span> : <span className="flex-1" />}
+        <Button size="sm" className="gap-1" onClick={submit} disabled={!name.trim() || rfNodes.length === 0 || saving}>
+          {saving ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}保存
+        </Button>
+      </div>
+      <div className="flex min-h-0 flex-1">
+        {/* 左：节点库 */}
+        <div className="w-44 shrink-0 overflow-y-auto border-r border-black/[0.06] bg-white p-2 dark:border-border dark:bg-card">
+          <div className="px-1 pb-1 pt-0.5 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">节点库</div>
+          <div className="space-y-1">
+            {(Object.keys(NODE_META) as FlowNodeType[]).map(type => (
+              <button key={type} type="button" onClick={() => addNode(type)} className="flex w-full items-center gap-2 rounded-lg border border-transparent px-2 py-1.5 text-left text-xs transition-colors hover:border-border hover:bg-muted/50" title={NODE_META[type].description}>
+                <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: NODE_META[type].color }} />
+                <span className="font-medium text-foreground">{NODE_META[type].label}</span>
+                <span className="ml-auto text-[10px] text-muted-foreground">添加</span>
+              </button>
+            ))}
+          </div>
+        </div>
+        {/* 中：画布 */}
+        <div className="min-w-0 flex-1 bg-background">
+          <ReactFlow
+            nodes={rfNodes}
+            edges={rfEdges}
+            onNodesChange={onNodesChange}
+            onEdgesChange={onEdgesChange}
+            onConnect={onConnect}
+            onNodeClick={(_, node) => { setSelectedNodeId(node.id); setSelectedEdgeId(null); }}
+            onEdgeClick={(_, edge) => { setSelectedEdgeId(edge.id); setSelectedNodeId(null); }}
+            onPaneClick={() => { setSelectedNodeId(null); setSelectedEdgeId(null); }}
+            nodeTypes={workflowNodeTypes}
+            defaultEdgeOptions={{ style: { stroke: "#52525b", strokeWidth: 1.5 } }}
+            fitView
+            proOptions={{ hideAttribution: true }}
+          >
+            <Background variant={BackgroundVariant.Dots} gap={18} size={1} color="#d4d4d8" />
+            <Controls />
+          </ReactFlow>
+        </div>
+        {/* 右：属性面板 */}
+        <div className="w-72 shrink-0 overflow-y-auto border-l border-black/[0.06] bg-white p-3 dark:border-border dark:bg-card">
+          {selectedNode ? (
+            <div className="space-y-3">
+              <div className="text-xs font-semibold text-foreground/80">节点配置</div>
+              <div>
+                <label className={labelClass}>节点名称</label>
+                <input value={selectedNode.data.label} onChange={event => patchNode({ label: event.target.value })} placeholder="节点在流程中的显示名称" className={selectClass} />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelClass}>类型</label>
+                  <select value={selectedNode.data.nodeType} onChange={event => changeNodeType(event.target.value as FlowNodeType)} className={selectClass}>
+                    {(Object.keys(NODE_META) as FlowNodeType[]).map(type => <option key={type} value={type}>{NODE_META[type].label}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className={labelClass}>执行器</label>
+                  <select value={selectedNode.data.executor ?? "llm"} onChange={event => patchNode({ executor: event.target.value as NodeExecutor })} className={selectClass}>
+                    {(Object.keys(EXECUTOR_META) as NodeExecutor[]).map(key => <option key={key} value={key}>{EXECUTOR_META[key].label}</option>)}
+                  </select>
+                </div>
+              </div>
+              {selectedNode.data.executor !== "none" ? (
+                <>
+                  <div>
+                    <label className={labelClass}>模型</label>
+                    <select value={selectedNode.data.modelId} onChange={event => patchNode({ modelId: event.target.value })} className={selectClass}>
+                      <option value="">默认模型</option>
+                      {models.map(model => <option key={model.key} value={model.key}>{model.label}</option>)}
+                    </select>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className={labelClass}>温度</label>
+                      <input type="number" step="0.1" min={0} max={2} value={selectedNode.data.temperature ?? ""} onChange={event => patchNode({ temperature: event.target.value ? Number(event.target.value) : undefined })} placeholder="0~2" className={selectClass} />
+                    </div>
+                    <div>
+                      <label className={labelClass}>最大输出</label>
+                      <input type="number" min={0} value={selectedNode.data.maxTokens ?? ""} onChange={event => patchNode({ maxTokens: event.target.value ? Number(event.target.value) : undefined })} placeholder="留空不限制" className={selectClass} />
+                    </div>
+                  </div>
+                  <div>
+                    <label className={labelClass}>系统提示 systemPrompt</label>
+                    <textarea rows={3} value={selectedNode.data.systemPrompt} onChange={event => patchNode({ systemPrompt: event.target.value })} placeholder="角色设定与行为约束" className={cn(selectClass, "resize-y leading-relaxed")} />
+                  </div>
+                  <div>
+                    <label className={labelClass}>用户提示模板 userPromptTemplate</label>
+                    <textarea rows={2} value={selectedNode.data.userPromptTemplate} onChange={event => patchNode({ userPromptTemplate: event.target.value })} placeholder="支持 {{input.prompt}} / {{vars.*}} / {{artifacts.别名}}" className={cn(selectClass, "resize-y leading-relaxed")} />
+                  </div>
+                  <div>
+                    <label className={labelClass}>产物别名 artifactKey</label>
+                    <input value={selectedNode.data.artifactKey ?? ""} onChange={event => patchNode({ artifactKey: event.target.value })} placeholder="供下游模板引用，如 report" className={selectClass} />
+                  </div>
+                </>
+              ) : (
+                <p className="py-2 text-xs leading-relaxed text-muted-foreground">执行器为「无」时透传或合并，不调用模型。</p>
+              )}
+              <Button variant="outline" size="sm" className="w-full gap-1 text-xs text-destructive hover:text-destructive" onClick={removeSelectedNode}><Trash2 size={12} />删除节点</Button>
+            </div>
+          ) : selectedEdge ? (
+            <div className="space-y-3">
+              <div className="text-xs font-semibold text-foreground/80">连线配置</div>
+              <div>
+                <label className={labelClass}>标签 label</label>
+                <input value={typeof selectedEdge.label === "string" ? selectedEdge.label : ""} onChange={event => patchEdge({ label: event.target.value })} placeholder="可选，如「通过」" className={selectClass} />
+              </div>
+              <div>
+                <label className={labelClass}>条件 condition</label>
+                <input value={selectedEdge.data?.condition ?? ""} onChange={event => patchEdge({ condition: event.target.value })} placeholder="如 pass / fail" className={selectClass} />
+              </div>
+              <label className="flex cursor-pointer items-center gap-2 text-xs text-foreground/80">
+                <input type="checkbox" checked={Boolean(selectedEdge.data?.loop)} onChange={event => patchEdge({ loop: event.target.checked })} className="h-3.5 w-3.5 accent-primary" />
+                回边 loop（有界迭代，不计入环检测）
+              </label>
+              <Button variant="outline" size="sm" className="w-full gap-1 text-xs text-destructive hover:text-destructive" onClick={removeSelectedEdge}><Trash2 size={12} />删除连线</Button>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <div className="text-xs font-semibold text-foreground/80">工作流配置</div>
+              <div>
+                <label className={labelClass}>描述</label>
+                <textarea rows={3} value={description} onChange={event => setDescription(event.target.value)} placeholder="这个工作流做什么？" className={cn(selectClass, "resize-y leading-relaxed")} />
+              </div>
+              <div>
+                <label className={labelClass}>节点访问上限 maxNodeVisits</label>
+                <input value={variables.maxNodeVisits ?? ""} onChange={event => setVariables(prev => ({ ...prev, maxNodeVisits: event.target.value }))} placeholder="留空不限制" className={selectClass} />
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function WorkflowPage({ sidebarOpen, onToggle, models }: {
   sidebarOpen: boolean;
   onToggle: () => void;
@@ -1580,15 +1918,12 @@ function WorkflowPage({ sidebarOpen, onToggle, models }: {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  // 配置弹窗：打开状态、编辑目标（null 表示新建）、表单字段（名称/描述/节点列表/选中节点/待添加类型）。
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [editTarget, setEditTarget] = useState<Workflow | null>(null);
-  const [name, setName] = useState("");
-  const [description, setDescription] = useState("");
-  const [nodes, setNodes] = useState<WorkflowNode[]>([]);
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
-  const [newNodeType, setNewNodeType] = useState<FlowNodeType>("plan");
+  // 可视化编辑器：null 表示停留在列表页；{mode:"new"} 新建，{mode:"edit",workflow} 编辑。
+  const [editor, setEditor] = useState<{ mode: "new" } | { mode: "edit"; workflow: Workflow } | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Workflow | null>(null);
+  // 内置模板：后端只读模板列表，点击「使用」实例化为工作流（参考 flow 项目 Sidebar 模板区）。
+  const [templates, setTemplates] = useState<Workflow[] | null>(null);
+  const [templateBusy, setTemplateBusy] = useState<string | null>(null);
 
   // 拉取工作流列表；失败时顶部显示错误提示，不打断其它操作。
   const loadWorkflows = async () => {
@@ -1603,8 +1938,26 @@ function WorkflowPage({ sidebarOpen, onToggle, models }: {
     }
   };
 
-  // 首次进入页面时加载工作流列表。
-  useEffect(() => { void loadWorkflows(); }, []);
+  // 首次进入页面时加载工作流列表与内置模板。
+  useEffect(() => {
+    void loadWorkflows();
+    listFlowTemplates().then(setTemplates).catch(() => setTemplates([]));
+  }, []);
+
+  // 实例化模板：成功后刷新列表，让新工作流出现在下方。
+  const useTemplate = async (templateId: string) => {
+    if (templateBusy !== null) return;
+    setTemplateBusy(templateId);
+    try {
+      await instantiateFlowTemplate(templateId);
+      setError(null);
+      await loadWorkflows();
+    } catch (templateError) {
+      setError(templateError instanceof Error ? templateError.message : "实例化模板失败");
+    } finally {
+      setTemplateBusy(null);
+    }
+  };
 
   // 关闭删除弹窗：延迟清除 body 残留的滚动/交互锁定（与其他弹窗一致）。
   const closeDelete = () => {
@@ -1612,75 +1965,20 @@ function WorkflowPage({ sidebarOpen, onToggle, models }: {
     window.setTimeout(clearModalResidue, 250);
   };
 
-  // 关闭配置弹窗并清空表单，避免残留上次的编辑/添加状态。
-  const closeDialog = () => {
-    setDialogOpen(false);
-    setEditTarget(null);
-    setName("");
-    setDescription("");
-    setNodes([]);
-    setSelectedNodeId(null);
-    window.setTimeout(clearModalResidue, 250);
-  };
+  // 新建 / 编辑：进入可视化编辑器（新建不带定义，编辑带入现有工作流）。
+  const openCreate = () => setEditor({ mode: "new" });
+  const openEdit = (workflow: Workflow) => setEditor({ mode: "edit", workflow });
 
-  // 新建：预置"输入 → 规划 → 输出"三个节点的起始链，方便快速开始。
-  const openCreate = () => {
-    const now = Date.now();
-    const initial: WorkflowNode[] = [
-      demoNode(`wfnode-${now}-1`, "intake", NODE_META.intake.label, { userPromptTemplate: "{{input.prompt}}", executor: "none" }),
-      demoNode(`wfnode-${now}-2`, "plan", NODE_META.plan.label, { executor: "llm", temperature: 0.3, maxTokens: 2000 }),
-      demoNode(`wfnode-${now}-3`, "output", NODE_META.output.label, { executor: "none" }),
-    ];
-    setEditTarget(null);
-    setName("");
-    setDescription("");
-    setNodes(initial);
-    setSelectedNodeId(initial[0].id);
-    setNewNodeType("plan");
-    setDialogOpen(true);
-  };
-
-  // 编辑：预填当前工作流的名称、描述与节点（浅拷贝避免直接改 props）。
-  const openEdit = (workflow: Workflow) => {
-    setEditTarget(workflow);
-    setName(workflow.name);
-    setDescription(workflow.description ?? "");
-    setNodes(workflow.nodes.map(node => ({ ...node, data: { ...node.data } })));
-    setSelectedNodeId(workflow.nodes[0]?.id ?? null);
-    setNewNodeType("plan");
-    setDialogOpen(true);
-  };
-
-  const submit = async () => {
-    const trimmedName = name.trim();
-    if (!trimmedName || nodes.length === 0 || saving) return;
-    setSaving(true);
-    try {
-      // 新建交给后端生成 id/version/createdAt；更新只提交用户可编辑的字段。
-      if (editTarget) {
-        await updateWorkflow(editTarget.id, {
-          name: trimmedName,
-          description: description.trim(),
-          nodes,
-          edges: buildFlowEdges(nodes),
-        });
-      } else {
-        await createWorkflow({
-          name: trimmedName,
-          description: description.trim(),
-          nodes,
-          edges: buildFlowEdges(nodes),
-          variables: {},
-        });
-      }
-      setError(null);
-      closeDialog();
-      void loadWorkflows();
-    } catch (submitError) {
-      setError(submitError instanceof Error ? submitError.message : "保存工作流失败");
-    } finally {
-      setSaving(false);
+  // 可视化编辑器保存回调：新建走 createWorkflow，编辑走 updateWorkflow，成功后刷新列表。
+  // 保存失败会抛出，由编辑器内展示错误并停留在编辑页。
+  const saveEditor = async (nameValue: string, descriptionValue: string, nodesValue: WorkflowNode[], edgesValue: WorkflowEdge[], variablesValue: Record<string, string>) => {
+    if (editor?.mode === "edit") {
+      await updateWorkflow(editor.workflow.id, { name: nameValue, description: descriptionValue, nodes: nodesValue, edges: edgesValue, variables: variablesValue });
+    } else {
+      await createWorkflow({ name: nameValue, description: descriptionValue, nodes: nodesValue, edges: edgesValue, variables: variablesValue });
     }
+    setError(null);
+    await loadWorkflows();
   };
 
   const confirmDelete = async () => {
@@ -1695,36 +1993,12 @@ function WorkflowPage({ sidebarOpen, onToggle, models }: {
     }
   };
 
-  // 更新选中节点的 data 字段（label/modelId/提示词等）。
-  const patchSelectedNode = (patch: Partial<WorkflowNodeData>) => {
-    if (!selectedNodeId) return;
-    setNodes(prev => prev.map(node => node.id === selectedNodeId ? { ...node, data: { ...node.data, ...patch } } : node));
-  };
-
-  // 修改选中节点的类型。
-  const changeNodeType = (type: FlowNodeType) => {
-    if (!selectedNodeId) return;
-    setNodes(prev => prev.map(node => node.id === selectedNodeId ? { ...node, type } : node));
-  };
-
-  const addNode = () => {
-    const id = `wfnode-${Date.now()}-${nodes.length + 1}`;
-    const node = demoNode(id, newNodeType, NODE_META[newNodeType].label, { executor: newNodeType === "human" ? "human" : "llm" });
-    setNodes(prev => [...prev, node]);
-    setSelectedNodeId(id);
-  };
-
-  const removeNode = (id: string) => {
-    const next = nodes.filter(node => node.id !== id);
-    setNodes(next);
-    if (selectedNodeId === id) setSelectedNodeId(next[next.length - 1]?.id ?? null);
-  };
-
-  const selectedNode = nodes.find(node => node.id === selectedNodeId) ?? null;
-  const selectClass = "w-full rounded-lg border bg-background px-3 py-2 text-sm outline-none focus:border-primary/60";
-
   return (
     <>
+      {editor ? (
+        <WorkflowEditor initial={editor} models={models} onCancel={() => setEditor(null)} onSave={saveEditor} />
+      ) : (
+        <>
       <PageHeader title="工作流" subtitle="把多个步骤连接成可重复使用的流程" sidebarOpen={sidebarOpen} onToggle={onToggle} />
       <ScrollArea className="min-h-0 flex-1 bg-white dark:bg-card">
         <div className="mx-auto max-w-4xl space-y-6 px-4 py-6 sm:px-8">
@@ -1737,6 +2011,25 @@ function WorkflowPage({ sidebarOpen, onToggle, models }: {
           </div>
           {error ? (
             <div className="flex items-center gap-2 rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive"><AlertCircle size={16} className="shrink-0" />{error}</div>
+          ) : null}
+          {templates && templates.length > 0 ? (
+            <div>
+              <div className="mb-2 text-sm font-semibold text-foreground/80">模板</div>
+              <div className="space-y-2">
+                {templates.map(template => (
+                  <div key={template.name} className="flex items-center gap-3 rounded-xl border border-dashed border-border bg-card/40 px-4 py-3">
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm font-medium text-foreground">{template.name}</div>
+                      {template.description ? <p className="mt-0.5 line-clamp-1 text-xs text-muted-foreground">{template.description}</p> : null}
+                    </div>
+                    <span className="shrink-0 text-xs text-muted-foreground">{template.nodes.length} 个节点</span>
+                    <Button size="sm" variant="outline" className="h-8 shrink-0 gap-1 px-2.5 text-xs" onClick={() => void useTemplate(template.name)} disabled={templateBusy !== null}>
+                      {templateBusy === template.name ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />}使用
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            </div>
           ) : null}
           {loading && workflows === null ? (
             <div className="flex items-center justify-center rounded-xl border border-dashed border-border bg-card/50 py-16 text-muted-foreground"><Loader2 size={18} className="mr-2 animate-spin" />加载中…</div>
@@ -1780,115 +2073,6 @@ function WorkflowPage({ sidebarOpen, onToggle, models }: {
         </div>
       </ScrollArea>
 
-      {/* 新建 / 编辑工作流配置弹窗：左侧节点列表，右侧选中节点的参数编辑（参考 flow 配置页字段） */}
-      <Dialog open={dialogOpen} onOpenChange={value => { if (!value) closeDialog(); }}>
-        <DialogContent className="max-w-3xl">
-          <DialogHeader>
-            <DialogTitle>{editTarget ? "编辑工作流" : "新建工作流"}</DialogTitle>
-            <DialogDescription>配置流程名称与各步骤节点参数。</DialogDescription>
-          </DialogHeader>
-          <div className="mt-4 space-y-4">
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div>
-                <label className="mb-1 block text-xs font-medium text-foreground/80">名称</label>
-                <input value={name} onChange={event => setName(event.target.value)} placeholder="例如：标准开发流程" autoFocus className="w-full rounded-lg border bg-background px-3 py-2 text-sm outline-none focus:border-primary/60" />
-              </div>
-              <div>
-                <label className="mb-1 block text-xs font-medium text-foreground/80">描述（可选）</label>
-                <input value={description} onChange={event => setDescription(event.target.value)} placeholder="这个工作流做什么？" className="w-full rounded-lg border bg-background px-3 py-2 text-sm outline-none focus:border-primary/60" />
-              </div>
-            </div>
-            <Separator />
-            <div className="text-xs font-semibold text-foreground/80">节点配置</div>
-            <div className="flex flex-col gap-4 md:flex-row">
-              <div className="w-full shrink-0 md:w-52">
-                <div className="space-y-1">
-                  {nodes.map(node => (
-                    <button key={node.id} type="button" onClick={() => setSelectedNodeId(node.id)} className={cn("group flex w-full items-center gap-2 rounded-lg border px-2.5 py-2 text-left transition-colors", selectedNodeId === node.id ? "border-primary/60 bg-primary/5" : "border-border hover:border-primary/30")}>
-                      <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: NODE_META[node.type].color }} />
-                      <span className="min-w-0 flex-1 truncate text-xs font-medium text-foreground">{node.data.label || NODE_META[node.type].label}</span>
-                      <span className="text-[10px] text-muted-foreground">{NODE_META[node.type].label}</span>
-                      <span role="button" tabIndex={-1} onClick={event => { event.stopPropagation(); removeNode(node.id); }} className="hidden shrink-0 rounded p-0.5 text-foreground/25 hover:text-red-500 group-hover:inline" title="删除节点"><X size={12} /></span>
-                    </button>
-                  ))}
-                </div>
-                <div className="mt-2 flex gap-1.5">
-                  <select value={newNodeType} onChange={event => setNewNodeType(event.target.value as FlowNodeType)} className="min-w-0 flex-1 rounded-lg border bg-background px-2 py-1.5 text-xs outline-none focus:border-primary/60">
-                    {(Object.keys(NODE_META) as FlowNodeType[]).map(type => <option key={type} value={type}>{NODE_META[type].label}</option>)}
-                  </select>
-                  <Button size="sm" variant="outline" className="h-8 shrink-0 px-2" onClick={addNode} title="添加节点"><Plus size={13} /></Button>
-                </div>
-              </div>
-              <div className="min-w-0 flex-1 space-y-3 rounded-xl border bg-background p-3">
-                {selectedNode ? (
-                  <>
-                    <div>
-                      <label className="mb-1 block text-xs font-medium text-foreground/80">节点名称</label>
-                      <input value={selectedNode.data.label} onChange={event => patchSelectedNode({ label: event.target.value })} placeholder="节点在流程中的显示名称" className={selectClass} />
-                    </div>
-                    <div className="grid grid-cols-2 gap-3">
-                      <div>
-                        <label className="mb-1 block text-xs font-medium text-foreground/80">类型</label>
-                        <select value={selectedNode.type} onChange={event => changeNodeType(event.target.value as FlowNodeType)} className={selectClass}>
-                          {(Object.keys(NODE_META) as FlowNodeType[]).map(type => <option key={type} value={type}>{NODE_META[type].label}</option>)}
-                        </select>
-                      </div>
-                      <div>
-                        <label className="mb-1 block text-xs font-medium text-foreground/80">执行器</label>
-                        <select value={selectedNode.data.executor ?? "llm"} onChange={event => patchSelectedNode({ executor: event.target.value as NodeExecutor })} className={selectClass}>
-                          {(Object.keys(EXECUTOR_META) as NodeExecutor[]).map(key => <option key={key} value={key}>{EXECUTOR_META[key].label} · {EXECUTOR_META[key].description}</option>)}
-                        </select>
-                      </div>
-                    </div>
-                    {selectedNode.data.executor !== "none" ? (
-                      <>
-                        <div>
-                          <label className="mb-1 block text-xs font-medium text-foreground/80">模型</label>
-                          <select value={selectedNode.data.modelId} onChange={event => patchSelectedNode({ modelId: event.target.value })} className={selectClass}>
-                            <option value="">默认模型</option>
-                            {models.map(model => <option key={model.key} value={model.key}>{model.label}</option>)}
-                          </select>
-                        </div>
-                        <div className="grid grid-cols-2 gap-3">
-                          <div>
-                            <label className="mb-1 block text-xs font-medium text-foreground/80">温度 temperature</label>
-                            <input type="number" step="0.1" min={0} max={2} value={selectedNode.data.temperature ?? ""} onChange={event => patchSelectedNode({ temperature: event.target.value ? Number(event.target.value) : undefined })} placeholder="0~2" className={selectClass} />
-                          </div>
-                          <div>
-                            <label className="mb-1 block text-xs font-medium text-foreground/80">最大输出 maxTokens</label>
-                            <input type="number" min={0} value={selectedNode.data.maxTokens ?? ""} onChange={event => patchSelectedNode({ maxTokens: event.target.value ? Number(event.target.value) : undefined })} placeholder="留空不限制" className={selectClass} />
-                          </div>
-                        </div>
-                        <div>
-                          <label className="mb-1 block text-xs font-medium text-foreground/80">系统提示 systemPrompt</label>
-                          <textarea rows={3} value={selectedNode.data.systemPrompt} onChange={event => patchSelectedNode({ systemPrompt: event.target.value })} placeholder="角色设定与行为约束" className={cn(selectClass, "resize-y leading-relaxed")} />
-                        </div>
-                        <div>
-                          <label className="mb-1 block text-xs font-medium text-foreground/80">用户提示模板 userPromptTemplate</label>
-                          <textarea rows={2} value={selectedNode.data.userPromptTemplate} onChange={event => patchSelectedNode({ userPromptTemplate: event.target.value })} placeholder="支持 {{input.prompt}} / {{vars.*}} / {{artifacts.别名}}" className={cn(selectClass, "resize-y leading-relaxed")} />
-                        </div>
-                        <div>
-                          <label className="mb-1 block text-xs font-medium text-foreground/80">产物别名 artifactKey（可选）</label>
-                          <input value={selectedNode.data.artifactKey ?? ""} onChange={event => patchSelectedNode({ artifactKey: event.target.value })} placeholder="供下游模板引用，如 report" className={selectClass} />
-                        </div>
-                      </>
-                    ) : (
-                      <p className="py-2 text-xs leading-relaxed text-muted-foreground">执行器为「无」时透传或合并，不调用模型。</p>
-                    )}
-                  </>
-                ) : (
-                  <div className="py-10 text-center text-xs text-muted-foreground">选择左侧节点进行配置</div>
-                )}
-              </div>
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="ghost" onClick={closeDialog}>取消</Button>
-            <Button onClick={submit} disabled={!name.trim() || nodes.length === 0 || saving}>{saving ? <Loader2 size={14} className="animate-spin" /> : null}保存</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
       {/* 删除工作流确认弹窗 */}
       <Dialog open={deleteTarget !== null} onOpenChange={value => { if (!value) closeDelete(); }}>
         <DialogContent className="max-w-sm">
@@ -1902,6 +2086,8 @@ function WorkflowPage({ sidebarOpen, onToggle, models }: {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+        </>
+      )}
     </>
   );
 }
