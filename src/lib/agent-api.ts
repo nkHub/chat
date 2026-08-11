@@ -354,6 +354,7 @@ const AKM_FLOW_RUN_TOOL: AgentTool = {
       properties: {
         workflow_id: { type: "string", description: "工作流 id（来自 akm_flow_list）" },
         prompt: { type: "string", description: "用户提示词，作为工作流输入注入 {{input.prompt}}" },
+        variables: { type: "object", description: "本次运行的临时变量（如 projectPath / language），覆盖工作流默认 variables，仅本次生效，不修改工作流定义" },
       },
       required: ["workflow_id", "prompt"],
     },
@@ -373,6 +374,21 @@ const AKM_FLOW_RUNS_TOOL: AgentTool = {
         offset: { type: "integer", description: "分页偏移，默认 0" },
       },
       required: [],
+    },
+  },
+};
+
+const AKM_FLOW_RUN_GET_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_flow_run_get",
+    description: "查询一次工作流运行的节点级状态：返回各节点（id / label / 执行器 / 状态 / 错误 / token / 文件差异）与最近日志，用于定位工作流卡住或失败的节点",
+    parameters: {
+      type: "object",
+      properties: {
+        run_id: { type: "string", description: "运行 id（来自 akm_flow_run 或 akm_flow_runs）" },
+      },
+      required: ["run_id"],
     },
   },
 };
@@ -769,6 +785,7 @@ export function resolveDeclaredTools(tools: string[]): AgentTool[] {
     AKM_FLOW_DELETE_TOOL,
     AKM_FLOW_RUN_TOOL,
     AKM_FLOW_RUNS_TOOL,
+    AKM_FLOW_RUN_GET_TOOL,
     // 原生通知工具：后端默认注入（agent_notify_enabled 开启），这里始终声明，避免白名单时丢失
     AKM_SEND_NOTIFICATION_TOOL,
     // 原生系统工具：后端默认注入（agent_native_tools_enabled 开启），这里始终声明，避免白名单时丢失

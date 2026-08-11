@@ -2338,10 +2338,10 @@ export default function App() {
     setModelsLoading(true);
     setModelsError(null);
     try {
-      // 过滤掉不能用于聊天的专用模型：reranker（重排序）/ embedding（向量化）/ review（评审），
+      // 过滤掉不能用于聊天的专用模型：reranker（重排序）/ embedding（向量化）/ review（评审）/ image（图像生成），
       // 其余按名称字母顺序排序。
       const loadedModels = (await fetchModels())
-        .filter(model => !/(reranker|embedding|review)/i.test(model.id))
+        .filter(model => !/(reranker|embedding|review|image)/i.test(model.id))
         .map(toChatModel)
         .sort((a, b) => a.label.localeCompare(b.label, "zh-CN"));
       setModels(loadedModels);
