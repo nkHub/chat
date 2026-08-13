@@ -497,6 +497,32 @@ const AKM_SUBAGENT_KILL_TOOL: AgentTool = {
   },
 };
 
+// 子 Agent 运行状态查询（对应后端内置 akm_subagent_list/status，agent_subagent_enabled 默认开启才注册）。
+// 用于在对话中查看子 Agent 列表与单个任务的完整信息（含日志尾部）。
+const AKM_SUBAGENT_LIST_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_subagent_list",
+    description: "列出所有（含运行中与已结束）子 Agent 任务，返回 task_id / 状态 / 嵌套层数 / 模型 / 工作区 / 创建时间，按创建时间倒序",
+    parameters: { type: "object", properties: {} },
+  },
+};
+
+const AKM_SUBAGENT_STATUS_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_subagent_status",
+    description: "查询单个子 Agent 任务的完整信息：状态 / 嵌套层数 / 模型 / 工作区 / 退出码 / 创建时间，以及运行日志尾部文本（最多 2000 字符），用于查看子进程运行情况与排查失败原因",
+    parameters: {
+      type: "object",
+      properties: {
+        task_id: { type: "string", description: "子 Agent 任务 id（来自 akm_subagent_spawn）" },
+      },
+      required: ["task_id"],
+    },
+  },
+};
+
 // 发送邮件（对应后端内置 akm_send_email，agent_email_enabled 为 true 且配置了 SMTP 才注册）。
 // 非只读，作为基础工具始终声明；向指定邮箱发送纯文本通知，可用性由后端配置开关控制。
 const AKM_SEND_EMAIL_TOOL: AgentTool = {
@@ -939,6 +965,8 @@ export function resolveDeclaredTools(tools: string[]): AgentTool[] {
     AKM_SUBAGENT_SPAWN_TOOL,
     AKM_SUBAGENT_WAIT_TOOL,
     AKM_SUBAGENT_KILL_TOOL,
+    AKM_SUBAGENT_LIST_TOOL,
+    AKM_SUBAGENT_STATUS_TOOL,
     // 原生通知工具：后端默认注入（agent_notify_enabled 开启），这里始终声明，避免白名单时丢失
     AKM_SEND_NOTIFICATION_TOOL,
     // 邮件工具：后端条件注册（agent_email_enabled 开启），这里始终声明，可用性由后端配置开关控制
