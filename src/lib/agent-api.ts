@@ -114,6 +114,33 @@ const AKM_EDIT_IMAGE_TOOL: AgentTool = {
   },
 };
 
+// 知识库检索工具（对应后端内置 akm_search_kb）。
+// 通过本机 markdown-kb 插件（POST /api/markdown-kb/query）检索已索引的 Markdown 知识库，
+// 返回命中片段（标题/文件名/相关度分数/正文摘要）。只读，作为基础工具始终声明；
+// 需本机已启用并索引 markdown-kb 插件。显式传 workspace_root 可按指定目录跨目录检索，否则自动锁定当前 Agent 工作区。
+const AKM_SEARCH_KB_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_search_kb",
+    description:
+      "通过 markdown-kb 知识库检索与问题最相关的文档片段，返回命中内容的标题、文件名、相关度分数与正文摘要。需要 markdown-kb 插件已启用且已学习文档",
+    parameters: {
+      type: "object",
+      properties: {
+        question: { type: "string", description: "检索问题" },
+        top_k: { type: "integer", description: "返回命中条数，1 到 20，默认 5" },
+        embedding_model: { type: "string", description: "向量模型，默认取插件配置" },
+        reranker_model: { type: "string", description: "重排模型，默认取插件配置" },
+        workspace_root: {
+          type: "string",
+          description: "显式指定检索的知识库工作目录（绝对路径），用于跨目录检索；不传时自动锁定当前 Agent 工作区",
+        },
+      },
+      required: ["question"],
+    },
+  },
+};
+
 // 获取服务器当前时间（对应后端内置 akm_get_time，无参数）。
 // 只读且无害，作为始终声明的基础工具，避免开启其它工具开关后因白名单注入丢失。
 const AKM_GET_TIME_TOOL: AgentTool = {
@@ -121,6 +148,28 @@ const AKM_GET_TIME_TOOL: AgentTool = {
   function: {
     name: "akm_get_time",
     description: "获取服务器当前时间，返回本地 ISO 时间、UTC 时间、UNIX 时间戳与时区",
+    parameters: { type: "object", properties: {} },
+  },
+};
+
+// 读取 AKM 服务健康状态（对应后端内置 akm_get_status，无参数）。
+// 只读，作为基础工具始终声明；返回服务健康、审计队列与插件运行状态。
+const AKM_GET_STATUS_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_get_status",
+    description: "读取 AKM 服务健康、审计队列和插件运行状态",
+    parameters: { type: "object", properties: {} },
+  },
+};
+
+// 列出已配置 Key（对应后端内置 akm_list_keys，无参数）。
+// 只读，作为基础工具始终声明；返回 Key 的非敏感状态与模型信息，不返回密钥。
+const AKM_LIST_KEYS_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_list_keys",
+    description: "列出 AKM 中已配置 Key 的非敏感状态与模型信息，不返回密钥",
     parameters: { type: "object", properties: {} },
   },
 };
@@ -393,6 +442,82 @@ const AKM_FLOW_RUN_GET_TOOL: AgentTool = {
   },
 };
 
+// 子 Agent 递归委托（对应后端内置 akm_subagent_spawn/wait/kill，agent_subagent_enabled 默认开启才注册）。
+// 主 Agent 可开启独立子进程会话，子进程调用 /v1/agent 运行次级对话，进程级隔离（默认独立临时工作区）。
+// 嵌套层数上限由 config.json 的 agent_subagent_max_depth 控制（默认 1，即主会话可开子进程、子进程内不可再开）。
+const AKM_SUBAGENT_SPAWN_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_subagent_spawn",
+    description: "开启一个独立的子 Agent 子进程（子进程调用 /v1/agent 运行次级对话，进程级隔离，默认使用独立临时工作区）。返回 task_id，随后用 akm_subagent_wait 等待结果、akm_subagent_kill 终止。嵌套层数有上限，且并发数量有上限",
+    parameters: {
+      type: "object",
+      properties: {
+        prompt: { type: "string", description: "子 Agent 需要独立完成的任务指令" },
+        model: { type: "string", description: "可选，子 Agent 使用的模型，默认继承当前模型" },
+        workspace_root: {
+          type: "string",
+          description: "可选，显式指定子 Agent 的工作目录（须为已存在的绝对路径）；不传时使用独立临时工作区",
+        },
+        timeout_ms: { type: "number", description: "可选，子 Agent 内部请求超时（毫秒），默认 600000" },
+      },
+      required: ["prompt"],
+    },
+  },
+};
+
+const AKM_SUBAGENT_WAIT_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_subagent_wait",
+    description: "等待指定子 Agent 完成并返回其结果文本。超时返回「仍在运行」状态而非失败，可稍后再次调用或改用 akm_subagent_kill 终止",
+    parameters: {
+      type: "object",
+      properties: {
+        task_id: { type: "string", description: "子 Agent 任务 id（来自 akm_subagent_spawn）" },
+        timeout_ms: { type: "number", description: "可选，本次等待超时（毫秒），默认 600000" },
+      },
+      required: ["task_id"],
+    },
+  },
+};
+
+const AKM_SUBAGENT_KILL_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_subagent_kill",
+    description: "终止指定子 Agent 子进程（含其进程组），释放资源",
+    parameters: {
+      type: "object",
+      properties: {
+        task_id: { type: "string", description: "子 Agent 任务 id（来自 akm_subagent_spawn）" },
+      },
+      required: ["task_id"],
+    },
+  },
+};
+
+// 发送邮件（对应后端内置 akm_send_email，agent_email_enabled 为 true 且配置了 SMTP 才注册）。
+// 非只读，作为基础工具始终声明；向指定邮箱发送纯文本通知，可用性由后端配置开关控制。
+const AKM_SEND_EMAIL_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_send_email",
+    description:
+      "发送邮件（SMTP）。需要管理员在 config.json 中配置 agent_email_smtp_host/user/password 且 agent_email_enabled=true。用于向指定邮箱发送纯文本通知",
+    parameters: {
+      type: "object",
+      properties: {
+        to: { type: "string", description: "收件人邮箱地址" },
+        subject: { type: "string", description: "邮件主题" },
+        body: { type: "string", description: "邮件正文（纯文本）" },
+        from_: { type: "string", description: "可选发件人地址，留空使用 SMTP 账号" },
+      },
+      required: ["to", "subject", "body"],
+    },
+  },
+};
+
 // 发送 macOS 原生系统通知（对应后端内置 akm_send_notification，agent_notify_enabled 默认开启才注册）。
 // 非只读，作为基础工具始终声明；适合 Agent 主动推送任务完成、定时提醒等短消息，不产生网络流量。
 const AKM_SEND_NOTIFICATION_TOOL: AgentTool = {
@@ -513,6 +638,25 @@ const AKM_GET_USAGE_STATS_TOOL: AgentTool = {
           description: "查询窗口：1 / 7 / 30 只返回该窗口；0 或省略时返回 1、7、30 三个窗口",
           enum: [0, 1, 7, 30],
         },
+      },
+    },
+  },
+};
+
+// 查询近期审计日志（对应后端内置 akm_list_logs）。
+// 只读，作为基础工具始终声明；返回 AKM 审计日志摘要，不返回请求体、响应体或请求头。
+const AKM_LIST_LOGS_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_list_logs",
+    description: "查询近期 AKM 审计日志摘要，不返回请求体、响应体或请求头",
+    parameters: {
+      type: "object",
+      properties: {
+        limit: { type: "integer", description: "返回条数，1 到 50，默认 20" },
+        status: { type: "string", enum: ["all", "success", "failed"], description: "状态筛选，默认 all" },
+        days: { type: "integer", description: "最近自然日范围，0 表示不限制，默认 1" },
+        key_alias: { type: "string", description: "按 Key 别名筛选，可选" },
       },
     },
   },
@@ -765,6 +909,10 @@ export function resolveDeclaredTools(tools: string[]): AgentTool[] {
   const declared: AgentTool[] = [];
   // 基础只读工具：始终声明，与后端未传 tools 时的默认注入子集对齐
   declared.push(
+    // 知识库检索：后端默认注入（markdown-kb 插件注册），这里始终声明，避免白名单时丢失
+    AKM_SEARCH_KB_TOOL,
+    AKM_GET_STATUS_TOOL,
+    AKM_LIST_KEYS_TOOL,
     AKM_GET_TIME_TOOL,
     AKM_GET_USAGE_STATS_TOOL,
     AKM_GET_KEYS_SUMMARY_TOOL,
@@ -772,6 +920,7 @@ export function resolveDeclaredTools(tools: string[]): AgentTool[] {
     AKM_LIST_PLUGINS_TOOL,
     AKM_LIST_SESSIONS_TOOL,
     AKM_LOAD_SESSION_TOOL,
+    AKM_LIST_LOGS_TOOL,
     // 交互澄清工具：后端默认注入，这里始终声明，保证显式传 tools 走白名单时不被丢弃
     AKM_ASK_USER_TOOL,
     // 定时任务工具：后端默认注入，这里始终声明，保证显式传 tools 走白名单时不被丢弃
@@ -786,8 +935,14 @@ export function resolveDeclaredTools(tools: string[]): AgentTool[] {
     AKM_FLOW_RUN_TOOL,
     AKM_FLOW_RUNS_TOOL,
     AKM_FLOW_RUN_GET_TOOL,
+    // 子 Agent 递归委托工具：后端默认注入（agent_subagent_enabled 开启），这里始终声明，避免白名单时丢失
+    AKM_SUBAGENT_SPAWN_TOOL,
+    AKM_SUBAGENT_WAIT_TOOL,
+    AKM_SUBAGENT_KILL_TOOL,
     // 原生通知工具：后端默认注入（agent_notify_enabled 开启），这里始终声明，避免白名单时丢失
     AKM_SEND_NOTIFICATION_TOOL,
+    // 邮件工具：后端条件注册（agent_email_enabled 开启），这里始终声明，可用性由后端配置开关控制
+    AKM_SEND_EMAIL_TOOL,
     // 原生系统工具：后端默认注入（agent_native_tools_enabled 开启），这里始终声明，避免白名单时丢失
     AKM_CLIPBOARD_GET_TOOL,
     AKM_CLIPBOARD_SET_TOOL,
