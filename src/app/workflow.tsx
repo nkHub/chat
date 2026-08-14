@@ -30,7 +30,8 @@ const NODE_META: Record<FlowNodeType, { label: string; color: string; descriptio
 // 节点执行器：决定该节点由谁执行，参考 flow 配置页的执行器下拉。
 const EXECUTOR_META: Record<NodeExecutor, { label: string; description: string }> = {
   llm: { label: "LLM", description: "对话模型调用" },
-  "pi-agent": { label: "Pi Agent", description: "编码代理" },
+  "pi-agent": { label: "Pi Agent", description: "本机 pi CLI 编码代理" },
+  "opencode-cli": { label: "Opencode CLI", description: "本机 Opencode CLI 编码" },
   human: { label: "人工", description: "人工审批门" },
   none: { label: "无", description: "透传 / 合并，不调模型" },
 };
@@ -90,7 +91,7 @@ function toWorkflowEdges(edges: CanvasEdge[]): WorkflowEdge[] {
 // 参考 flow 项目的 FlowNode 组件，配色适配本项目的浅色主题。
 const WorkflowCanvasNode = memo(({ data, selected }: NodeProps<CanvasNode>) => {
   const meta = NODE_META[data.nodeType];
-  const executorShort: Partial<Record<NodeExecutor, string>> = { "pi-agent": "Pi", human: "人工", none: "透传" };
+  const executorShort: Partial<Record<NodeExecutor, string>> = { "pi-agent": "Pi", "opencode-cli": "Opencode", human: "人工", none: "透传" };
   const executorText = data.executor ? (executorShort[data.executor] ?? "LLM") : "LLM";
   return (
     <div className={cn(

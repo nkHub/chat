@@ -1318,7 +1318,7 @@ export async function runTask(taskId: string): Promise<void> {
 // ── 工作流（/v1/flow）类型与 API，数据结构与 ccs flow 模块一致 ──
 export type FlowNodeType = "intake" | "plan" | "code" | "review" | "test" | "fix" | "human" | "router" | "merge" | "output";
 
-export type NodeExecutor = "llm" | "pi-agent" | "human" | "none";
+export type NodeExecutor = "llm" | "pi-agent" | "opencode-cli" | "human" | "none";
 
 export type WorkflowNodeData = {
   label: string;
