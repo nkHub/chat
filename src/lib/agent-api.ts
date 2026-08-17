@@ -328,7 +328,7 @@ const AKM_DELETE_TASK_TOOL: AgentTool = {
 // 工作流引擎工具组（对应后端 akm_flow_*，build_builtin_tools 注册）：
 // 默认注入（未传 tools）时后端会注入全部内置工具含 akm_flow_*；显式传 tools 走
 // 白名单时需前端声明，这里始终声明，保证白名单注入时不被丢弃。
-// 6 个工具覆盖工作流引擎的查询/读取/保存/删除/运行/运行记录查看。
+// 7 个工具覆盖工作流引擎的查询/读取/保存/删除/运行/运行记录查看/中止。
 
 const AKM_FLOW_LIST_TOOL: AgentTool = {
   type: "function",
@@ -432,6 +432,21 @@ const AKM_FLOW_RUN_GET_TOOL: AgentTool = {
   function: {
     name: "akm_flow_run_get",
     description: "查询一次工作流运行的节点级状态：返回各节点（id / label / 执行器 / 状态 / 错误 / token / 文件差异）与最近日志，用于定位工作流卡住或失败的节点",
+    parameters: {
+      type: "object",
+      properties: {
+        run_id: { type: "string", description: "运行 id（来自 akm_flow_run 或 akm_flow_runs）" },
+      },
+      required: ["run_id"],
+    },
+  },
+};
+
+const AKM_FLOW_CANCEL_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_flow_cancel",
+    description: "中止一次工作流运行（取消）：按 run_id 中断正在执行的节点、跳过待执行节点，运行置为 cancelled；适用于卡住或不再等待的运行",
     parameters: {
       type: "object",
       properties: {
@@ -961,6 +976,7 @@ export function resolveDeclaredTools(tools: string[]): AgentTool[] {
     AKM_FLOW_RUN_TOOL,
     AKM_FLOW_RUNS_TOOL,
     AKM_FLOW_RUN_GET_TOOL,
+    AKM_FLOW_CANCEL_TOOL,
     // 子 Agent 递归委托工具：后端默认注入（agent_subagent_enabled 开启），这里始终声明，避免白名单时丢失
     AKM_SUBAGENT_SPAWN_TOOL,
     AKM_SUBAGENT_WAIT_TOOL,
