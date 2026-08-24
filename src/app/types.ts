@@ -57,10 +57,19 @@ type Message = {
   // compacted 为本次回复运行期间自动压缩上下文的次数（final 事件携带）。
   contextWarning?: ContextWarning;
   compacted?: number;
+  // 手动压缩上下文后的摘要提示消息：content 存放该轮压缩生成的摘要文本，
+  // 渲染成带锁图标的摘要卡片，作为会话中被替换掉的早期历史的纸面记录；
+  // 保留此标记是为了在向模型重发历史时仍能看到摘要文字。
+  compactSummary?: boolean;
   // AI 调用 akm_ask_user 工具时的澄清问题：question 为问题原文，options/multiple
   // 对应三模式（无 options=自由文本、有 options 单选、options+multiple 多选），
   // messages 为后端返回的完整工作消息（用户在下面回答后拼接该上下文续跑同一轮 Agent）。
   askUser?: { question: string; options?: string[]; multiple?: boolean; messages: AgentMessage[] };
+  // 发送时携带的引用：skillRef 为唯一 Skill（chip「生图」），sessionRefs 为引用的
+  // 其他会话（chip 可多个，上限 3）。只存引用元数据，不在气泡里摊开摘录/模板全文；
+  // P1 发送展开阶段再据 template 与被引会话内容组装请求正文。
+  skillRef?: { id: string; name: string };
+  sessionRefs?: { id: string; title: string }[];
 };
 
 type Session = { id: string; title: string; time: string; tools?: string[]; modelKey?: string; instructions?: string; autoTitled?: boolean };

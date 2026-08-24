@@ -1,5 +1,5 @@
 import { useContext, useEffect, useMemo, useRef, useState } from "react";
-import { Bot, CircleStop, ImageIcon, Loader2, Paperclip, PanelLeftClose, PanelLeftOpen, Search, Send, X } from "lucide-react";
+import { Bot, CircleStop, ImageIcon, Loader2, Lock, Paperclip, PanelLeftClose, PanelLeftOpen, Search, Send, X } from "lucide-react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -7,15 +7,50 @@ import { Separator } from "@/components/ui/separator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { AskUserCard, CitationsBlock, ContextHint, FunctionCallBlock, MessageActions, StatusNotice } from "./blocks";
+import { ComposerSuggest, type SuggestGroup } from "./composer-suggest";
 import { formatDisplayTime, messageText } from "./helpers";
 import { MemoMarkdown, ThinkingBlock } from "./markdown";
 import { PreviewContext } from "./preview";
 import { EmptyChat, ModelSettingsPopover, ThemeSettingsPopover } from "./sidebar";
+import { BUILTIN_SKILLS, filterSkills, type Skill } from "./skills";
 import { collectSubagentList, collectSubagentRuns, findSubagentRun, isSubagentTool, SubagentCard, SubagentListCard, SubagentListPanel, SubagentPanel, type SubagentListTask, type SubagentRun } from "./subagent";
 import type { ChatModel, Message, Session } from "./types";
 
+// `/` 上拉的命令列表（第一期最小集）：选中即执行，不回填 chip。
+const SLASH_COMMANDS: { id: string; name: string; aliases: string[]; description: string }[] = [
+  { id: "stop", name: "停止", aliases: ["停止", "stop"], description: "中断当前回复" },
+  { id: "new", name: "新对话", aliases: ["新对话", "new"], description: "开启一个全新的会话" },
+  { id: "compact", name: "压缩上下文", aliases: ["压缩", "compact"], description: "把较早对话收成摘要，保留最近的消息" },
+];
+
+// 触发式建议面板的状态：trigger 为触发字符（$ / ），query 为触发后到光标的连续文本，
+// start 为触发字符在输入文本中的下标，供选中后精确删除 `$token` 这段字。
+type SuggestState = { trigger: "$" | "/"; query: string; start: number } | null;
+
+// 检测输入文本光标位置处是否需要弹出建议面板。规则（卡死，否则误弹）：
+// - 触发字符必须是 token 边界：行首，或前一个字符是空白；
+// - 触发字符到光标之间不能有空白（一旦继续输入了正文就不弹）；
+// - 跨行（\n）不触发。
+// IME composing 期间由调用方传 false，本函数不感知。
+function detectTrigger(text: string, pos: number): SuggestState {
+  for (let index = pos - 1; index >= 0; index -= 1) {
+    const char = text[index];
+    if (char === "\n") return null;
+    if (char === "$" || char === "/") {
+      const boundary = index === 0 || /\s/.test(text[index - 1]);
+      if (!boundary) return null;
+      const token = text.slice(index + 1, pos);
+      // token 内含空白说明触发词已结束（进入了正文），不再弹。
+      if (/\s/.test(token)) return null;
+      return { trigger: char, query: token, start: index };
+    }
+  }
+  return null;
+}
+
 function ChatPage({
   session,
+  sessions,
   messages,
   model,
   models,
@@ -26,13 +61,18 @@ function ChatPage({
   onModelChange,
   onReloadModels,
   onSend,
+  onNewSession,
   onRetry,
   onStop,
   onAnswer,
   tools,
   onToolsChange,
+  pendingGuide,
+  onCancelGuide,
+  onCompact,
 }: {
   session?: Session;
+  sessions: Session[];
   messages: Message[];
   model: ChatModel | null;
   models: ChatModel[];
@@ -42,15 +82,30 @@ function ChatPage({
   onToggleSidebar: () => void;
   onModelChange: (model: ChatModel) => void;
   onReloadModels: () => void;
-  onSend: (content: string, attachments: File[], tools: string[]) => void;
+  onSend: (content: string, attachments: File[], tools: string[], skillRef?: { id: string; name: string }, sessionRefs?: { id: string; title: string }[]) => void;
+  onNewSession: () => void;
   onRetry: (id: string) => void;
   onAnswer: (assistantMessageId: string, answer: string) => void;
   onStop: () => void;
   tools: string[];
   onToolsChange: (tools: string[]) => void;
+  pendingGuide?: string;
+  onCancelGuide?: () => void;
+  onCompact: () => Promise<string | null>;
 }) {
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<File[]>([]);
+  // —— `$` / `/` 触发式建议面板状态 ——
+  // suggest 非空时弹出上拉列表；suggestIndex 为跨分组的扁平选中索引；
+  // skillChip 为已选 Skill（唯一，再选新 Skill 替换）；sessionChips 为已引用会话（上限 3，满则顶掉最早）。
+  const [suggest, setSuggest] = useState<SuggestState>(null);
+  const [suggestIndex, setSuggestIndex] = useState(0);
+  const [skillChip, setSkillChip] = useState<Skill | null>(null);
+  const [sessionChips, setSessionChips] = useState<{ id: string; title: string }[]>([]);
+  // 轻提示（如命令不可用、下一期实现等），数秒后自动消失。
+  const [notice, setNotice] = useState("");
+  // 删除 `$token` 把光标放回触发点：记录待设置的光标位置，input 更新后由 effect 落位。
+  const pendingCaretRef = useRef<number | null>(null);
   // 右侧子进程面板：activeSubagent 为当前选中的子进程（null 时面板关闭）。
   // 数据从消息的工具调用段聚合而来，不额外请求后端。
   const [activeSubagent, setActiveSubagent] = useState<SubagentRun | null>(null);
@@ -186,12 +241,132 @@ function ChatPage({
     return () => observer.disconnect();
   }, []);
 
+  // 上拉列表的分组内容：按 trigger 分两类。
+  // `$` → Skill / 会话（排除当前会话，按标题过滤，会话过多时只取最近 8 个）；
+  // `/` → 命令 / 模型（模型直接列出可选，对齐计划「/模型」的清单式实现）。
+  // 空分组不参与渲染。
+  const suggestGroups = useMemo<SuggestGroup[]>(() => {
+    if (!suggest) return [];
+    const hit = (value: string) => !suggest.query.trim() || value.toLowerCase().includes(suggest.query.trim().toLowerCase());
+    if (suggest.trigger === "$") {
+      const groups: SuggestGroup[] = [];
+      const skills = filterSkills(suggest.query);
+      if (skills.length > 0) {
+        groups.push({ label: "Skill", items: skills.map(skill => ({ id: skill.id, name: skill.name, description: skill.description })) });
+      }
+      const others = sessions
+        .filter(sessionItem => sessionItem.id !== session?.id)
+        .filter(sessionItem => hit(sessionItem.title))
+        .slice(0, 8)
+        .map(sessionItem => ({ id: sessionItem.id, name: sessionItem.title || "新对话", description: "会话" }));
+      if (others.length > 0) {
+        groups.push({ label: "会话", items: others });
+      }
+      return groups;
+    }
+    const commands: SuggestGroup[] = [];
+    const matchedCommands = SLASH_COMMANDS
+      .filter(command => hit(command.name) || command.aliases.some(alias => hit(alias)))
+      .map(command => ({ id: command.id, name: command.name, description: command.description }));
+    if (matchedCommands.length > 0) {
+      commands.push({ label: "命令", items: matchedCommands });
+    }
+    if (models.length > 0) {
+      commands.push({ label: "模型", items: models.map(modelItem => ({ id: `model:${modelItem.key}`, name: modelItem.label, description: "模型" })) });
+    }
+    return commands;
+  }, [suggest, sessions, session?.id, models]);
+
+  // 触发词或 trigger 变化时重置选中索引到 0，避免残留越界高亮。
+  useEffect(() => {
+    setSuggestIndex(0);
+  }, [suggest?.trigger, suggest?.query]);
+
+  // 删除 `$token` 后把光标落回触发点（input 更新后执行）。
+  useEffect(() => {
+    if (pendingCaretRef.current === null || !textareaRef.current) return;
+    const caret = pendingCaretRef.current;
+    textareaRef.current.focus();
+    textareaRef.current.setSelectionRange(caret, caret);
+    pendingCaretRef.current = null;
+  }, [input]);
+
+  // 轻提示数秒后自动消失。
+  useEffect(() => {
+    if (!notice) return;
+    const timer = window.setTimeout(() => setNotice(""), 2400);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
+
+  // 从输入文本删除 `$token` 段（触发字符 + 后续连续文本），光标回落到触发点。
+  // `/` 命令同样只吃掉这一个 token，输入框里其余文字原样保留。
+  const removeSuggestToken = () => {
+    if (!suggest) return;
+    pendingCaretRef.current = suggest.start;
+    setInput(previous => previous.slice(0, suggest.start) + previous.slice(suggest.start + suggest.trigger.length + suggest.query.length));
+    setSuggest(null);
+    setSuggestIndex(0);
+  };
+
+  // 上拉某一项的选中处理。`$` 触发的项回填成 chip；`/` 触发的项即时执行动作。
+  const selectSuggestItem = (item: { id: string; name: string }) => {
+    if (!suggest) return;
+    if (suggest.trigger === "$") {
+      const skill = filterSkills(suggest.query).find(candidate => candidate.id === item.id) ?? BUILTIN_SKILLS.find(candidate => candidate.id === item.id);
+      if (skill) {
+        // Skill chip 同时只允许一个：再选新 Skill 直接替换掉旧的。
+        setSkillChip(skill);
+      } else {
+        // 会话引用 chip 可多个、上限 3，满则顶掉最早；重复选择跳过。
+        setSessionChips(previous => {
+          if (previous.some(ref => ref.id === item.id)) return previous;
+          return [...previous.filter(ref => ref.id !== item.id), { id: item.id, title: item.name }].slice(-3);
+        });
+      }
+      removeSuggestToken();
+      return;
+    }
+    // `/` 命令：选中即执行，不回填 chip。
+    if (item.id.startsWith("model:")) {
+      const modelItem = models.find(candidate => candidate.key === item.id.slice("model:".length));
+      if (modelItem) onModelChange(modelItem);
+    } else if (item.id === "stop") {
+      if (isReplyPending) onStop();
+      else setNotice("当前没有进行中的回复");
+    } else if (item.id === "new") {
+      onNewSession();
+    } else if (item.id === "compact") {
+      // 压缩前后给足界面反馈：进行中与完成/失败都会滚动提示，摘要卡片本身也已展示在消息区。
+      if (isReplyPending) {
+        setNotice("回复生成中，请稍后再压缩上下文");
+      } else {
+        setNotice("正在压缩上下文…");
+        void onCompact().then(error => {
+          if (error) setNotice(error);
+          else setNotice("压缩完成：较早的对话已归纳为摘要");
+        });
+      }
+    }
+    removeSuggestToken();
+  };
+
   const send = () => {
-    // 回复未完成时不允许再发；空内容同样拦截
-    if (isReplyPending || (!input.trim() && !attachments.length)) return;
-    onSend(input.trim() || attachments.map(file => file.name).join(", "), attachments, tools);
+    // 空内容拦截；回复进行中时点击发送视为"中途引导"（POST 由 App 层挂起，等自然停顿点插入），
+    // 不再整条拦截，避免打断用户输入节奏。
+    if (!input.trim() && !attachments.length) return;
+    onSend(
+      input.trim() || attachments.map(file => file.name).join(", "),
+      attachments,
+      tools,
+      skillChip ? { id: skillChip.id, name: skillChip.name } : undefined,
+      sessionChips.length > 0 ? sessionChips.map(ref => ({ id: ref.id, title: ref.title })) : undefined,
+    );
     // 发送新消息即重新吸附到底部：即使用户此前上翻阅读历史，也应回到最新消息。
     setStickToBottom(true);
+    setSkillChip(null);
+    setSessionChips([]);
+    setSuggest(null);
+    setSuggestIndex(0);
     setInput("");
     setAttachments([]);
     if (textareaRef.current) textareaRef.current.style.height = "44px";
@@ -266,6 +441,14 @@ function ChatPage({
                       <Loader2 size={13} className="animate-spin text-primary" />
                       <span>{message.streamStatus || "正在生成回复…"}</span>
                     </div>
+                  ) : message.compactSummary ? (
+                    <div className="min-w-0 rounded-xl border border-dashed border-primary/40 bg-primary/5 px-4 py-3 shadow-sm [overflow-wrap:anywhere]">
+                      <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-primary">
+                        <Lock size={12} className="shrink-0" />
+                        <span>已压缩较早的对话</span>
+                      </div>
+                      <div className="text-sm text-muted-foreground [overflow-wrap:anywhere]">{message.content}</div>
+                    </div>
                   ) : message.content ? (
                     <div className="min-w-0 rounded-xl border bg-card px-4 py-3 shadow-sm [overflow-wrap:anywhere]">
                       <MemoMarkdown content={message.content} />
@@ -285,6 +468,13 @@ function ChatPage({
           <div key={message.id} className="flex flex-row-reverse gap-3">
             <Avatar className="mt-0.5 h-7 w-7 shrink-0"><AvatarFallback className="bg-blue-100 text-xs font-bold text-blue-600">测</AvatarFallback></Avatar>
             <div className="flex max-w-[88%] flex-col items-end sm:max-w-[72%]">
+              {/* 消息携带的 Skill / 会话引用 chip：气泡只显示短引用，不摊开摘录全文 */}
+              {(message.skillRef || message.sessionRefs?.length) ? (
+                <div className="mb-1 flex max-w-full flex-wrap justify-end gap-1.5">
+                  {message.skillRef ? <span className="inline-flex items-center rounded-md bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">{message.skillRef.name}</span> : null}
+                  {message.sessionRefs?.map(ref => <span key={ref.id} className="inline-flex items-center rounded-md bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">{ref.title}</span>)}
+                </div>
+              ) : null}
               <div className={cn("min-w-0 rounded-xl px-4 py-2.5 text-sm leading-relaxed transition-opacity [overflow-wrap:anywhere]", message.status === "send_failed" ? "border border-destructive/30 bg-destructive/5 text-destructive" : "bg-primary text-primary-foreground", message.status === "sending" && "opacity-60")}>{message.content}</div>
               {message.files?.length ? <div className="mt-1.5 flex max-w-full flex-wrap justify-end gap-1.5">{message.files.map(file => file.type.startsWith("image/") && file.previewUrl ? <button key={`${file.name}-${file.size}`} type="button" aria-label={`预览${file.name}`} onClick={() => openPreview(file.previewUrl!)} className="overflow-hidden rounded-lg border border-primary/30 bg-white shadow-sm transition-transform hover:scale-105 dark:bg-muted"><img src={file.previewUrl} alt={file.name} className="h-12 w-12 object-cover" /></button> : <div key={`${file.name}-${file.size}`} className="flex max-w-[200px] items-center gap-1.5 rounded-lg border border-primary/30 bg-white px-2.5 py-1 text-xs font-medium text-primary dark:bg-muted"><ImageIcon size={11} className="shrink-0 text-primary/70" /><span className="truncate">{file.name}</span></div>)}</div> : null}
               {message.status === "sending" && <div className="mt-1 flex items-center gap-1"><Loader2 size={10} className="animate-spin text-muted-foreground" /><span className="text-xs text-muted-foreground">发送中…</span></div>}
@@ -297,29 +487,93 @@ function ChatPage({
     </ScrollArea>
     <div className="shrink-0 bg-white px-3 py-3 sm:px-6 sm:py-4 dark:bg-card">
       <div className="mx-auto max-w-3xl">
+        <div className="relative">
+          <ComposerSuggest
+            open={suggest !== null}
+            groups={suggestGroups}
+            query={suggest?.query ?? ""}
+            activeIndex={suggestIndex}
+            onSelect={selectSuggestItem}
+          />
         <div className="overflow-hidden rounded-xl border bg-card shadow-sm transition-all focus-within:border-primary/50 focus-within:ring-1 focus-within:ring-primary/30">
+          {notice ? (
+            <div className="flex items-center justify-center border-b border-border/60 bg-primary/5 px-4 py-1.5 text-xs text-primary">{notice}</div>
+          ) : null}
+          {/* `$` 选中后回填的 chip 行：Skill 唯一，会话可多个（上限 3），均可点 × 移除 */}
+          {(skillChip || sessionChips.length > 0) ? (
+            <div className="flex flex-wrap items-center gap-1.5 px-4 pb-1 pt-2.5">
+              {skillChip ? (
+                <span className="flex items-center gap-1.5 rounded-lg border border-primary/30 bg-primary/5 px-2.5 py-1 text-xs font-medium text-primary">{skillChip.name}<button type="button" aria-label={`移除${skillChip.name}`} onClick={() => setSkillChip(null)} className="ml-0.5 shrink-0 text-primary/60 hover:text-primary"><X size={12} /></button></span>
+              ) : null}
+              {sessionChips.map(ref => (
+                <span key={ref.id} className="flex items-center gap-1.5 rounded-lg border border-primary/30 bg-primary/5 px-2.5 py-1 text-xs font-medium text-primary">{ref.title}<button type="button" aria-label={`移除${ref.title}`} onClick={() => setSessionChips(previous => previous.filter(item => item.id !== ref.id))} className="ml-0.5 shrink-0 text-primary/60 hover:text-primary"><X size={12} /></button></span>
+              ))}
+            </div>
+          ) : null}
           {attachments.length > 0 && <div className="flex flex-wrap gap-1.5 px-4 pb-1 pt-3">{attachments.map((file, index) => <div key={`${file.name}-${index}`} className="flex max-w-[180px] items-center gap-1.5 rounded-lg border border-border bg-muted px-2.5 py-1 text-xs text-foreground/70"><Paperclip size={11} className="shrink-0 text-muted-foreground" /><span className="truncate">{file.name}</span><button type="button" aria-label={`移除${file.name}`} onClick={() => setAttachments(prev => prev.filter((_, itemIndex) => itemIndex !== index))} className="ml-0.5 shrink-0 text-muted-foreground hover:text-foreground"><X size={12} /></button></div>)}</div>}
+          {/* 挂起的中途引导提示：回复进行中发送的内容被暂时挂起，待当前轮自然停顿时由后端接管插入 */}
+          {pendingGuide ? (
+            <div className="flex items-center justify-between gap-2 border-t border-border/60 px-4 py-1.5 text-xs text-muted-foreground">
+              <span className="truncate">引导已挂起：{pendingGuide}</span>
+              <button type="button" aria-label="撤消引导" title="撤消引导" onClick={() => onCancelGuide?.()} className="ml-0.5 shrink-0 text-muted-foreground/70 hover:text-foreground"><X size={12} /></button>
+            </div>
+          ) : <div className="h-px" />}
           <textarea
             ref={textareaRef}
             value={input}
             rows={1}
-            // 回复进行中时提示用户稍候，避免误以为可以连发
-            placeholder={isReplyPending ? "上一条回复生成中，请稍候…" : "发送消息… (Shift+Enter 换行)"}
-            disabled={isReplyPending}
+            // 回复进行中也可继续输入：输入的内容会作为"中途引导"被挂起（见 pendingGuide），
+            // 待当前轮 LLM 输出完整收尾时自动插入，而不是强制等整轮结束。
+            placeholder={isReplyPending ? "回复生成中，可输入引导，将在自然停顿时插入…" : "发送消息… (Shift+Enter 换行)"}
             onChange={event => {
-              setInput(event.target.value);
+              const value = event.target.value;
+              setInput(value);
               event.target.style.height = "auto";
               event.target.style.height = `${Math.min(event.target.scrollHeight, 160)}px`;
+              // 中文输入法 composing 期间不弹，避免拼音阶段误触发列表。
+              const composing = (event.nativeEvent as InputEvent).isComposing === true;
+              const pos = event.target.selectionEnd ?? value.length;
+              setSuggest(composing ? null : detectTrigger(value, pos));
             }}
             onKeyDown={event => {
-              if (event.key === "Enter" && !event.shiftKey) {
+              // 弹层打开时：↑↓ 选择、Enter 确认、Esc 关闭；Enter 不再发送消息。
+              if (suggest) {
+                const items = suggestGroups.flatMap(group => group.items);
+                const total = items.length;
+                if (event.key === "Enter" && !event.shiftKey) {
+                  event.preventDefault();
+                  if (total > 0) selectSuggestItem(items[suggestIndex % total]);
+                  else {
+                    setSuggest(null);
+                    setSuggestIndex(0);
+                  }
+                  return;
+                }
+                if (event.key === "ArrowDown") {
+                  event.preventDefault();
+                  if (total > 0) setSuggestIndex(index => (index + 1) % total);
+                  return;
+                }
+                if (event.key === "ArrowUp") {
+                  event.preventDefault();
+                  if (total > 0) setSuggestIndex(index => (index - 1 + total) % total);
+                  return;
+                }
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  setSuggest(null);
+                  setSuggestIndex(0);
+                  return;
+                }
+              }
+              if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
                 event.preventDefault();
                 send();
               }
             }}
             className={cn(
               "w-full resize-none bg-transparent px-4 pb-2 pt-3.5 text-sm text-foreground outline-none placeholder:text-muted-foreground",
-              isReplyPending && "cursor-not-allowed opacity-60",
+              isReplyPending && "opacity-90",
             )}
             style={{ minHeight: 44, maxHeight: 160 }}
           />
@@ -332,11 +586,13 @@ function ChatPage({
             </div>
             <div className="flex min-w-0 items-center gap-2">
               <ModelSettingsPopover model={model} models={models} modelsLoading={modelsLoading} modelsError={modelsError} onModelChange={onModelChange} onReloadModels={onReloadModels} />
-              {/* 回复生成中时按钮切换为"停止"：点击中断当前回复；否则为发送按钮 */}
-              {isReplyPending
+              {/* 回复生成中：输入框有内容时按钮仍为发送，点击发送"中途引导"（App 层挂起，等自然停顿时插入）；
+                  输入框为空时才切换为"停止"，点击中断当前回复；非回复中始终为发送按钮 */}
+              {isReplyPending && !input.trim() && !attachments.length
                 ? <Button size="icon-sm" className="h-7 w-7" onClick={onStop} title="中断回复"><CircleStop size={13} /></Button>
-                : <Button size="icon-sm" className="h-7 w-7" onClick={send} disabled={!model || (!input.trim() && !attachments.length)} title="发送消息"><Send size={13} /></Button>}
+                : <Button size="icon-sm" className="h-7 w-7" onClick={send} disabled={!model || (!input.trim() && !attachments.length)} title={isReplyPending ? "发送引导" : "发送消息"}><Send size={13} /></Button>}
             </div>
+          </div>
           </div>
         </div>
       </div>

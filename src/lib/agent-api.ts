@@ -24,6 +24,18 @@ export type AgentResponse = {
   usage?: Record<string, number>;
 };
 
+export type AgentCompactResponse = {
+  ok: boolean;
+  messages?: AgentMessage[];
+  summary?: string;
+  removed_count?: number;
+  before_count?: number;
+  after_count?: number;
+  estimated_tokens?: number;
+  error?: string;
+  detail?: string;
+};
+
 // OpenAI function calling 格式的工具定义，与后端 /v1/agent 内置工具保持一致。
 // 后端采用白名单注入：请求显式传入 tools 时只注入列表内声明的工具（未声明的内置工具
 // 如 tavily_search / akm_generate_image 等不会被注入，避免模型未经声明自主调用）。
@@ -1016,7 +1028,7 @@ export function resolveDeclaredTools(tools: string[]): AgentTool[] {
   return declared;
 }
 
-export type AgentStreamEventName = "reasoning_delta" | "model_delta" | "turn_start" | "tool_call" | "tool_result" | "context_warning" | "ask_user" | "final" | "error";
+export type AgentStreamEventName = "reasoning_delta" | "model_delta" | "turn_start" | "tool_call" | "tool_result" | "context_warning" | "ask_user" | "turn_pause" | "final" | "error";
 
 // 上下文占用警告信息（对应后端 context_warning 事件）：
 // 上下文估算已用 / 上限 / 剩余 tokens、占用比例与已压缩次数。
@@ -1054,6 +1066,8 @@ export type AgentStreamEvent = {
     remaining_tokens?: number;
     ratio?: number;
     compacted?: number;
+    // 自然停顿点：turn_pause 事件在当前轮 LLM 输出完整收尾处下发，携带完整工作上下文
+    // 快照（messages）。客户端若要在回复中途插入引导，可在收到该事件后携带快照续跑。
   };
 };
 
@@ -1157,8 +1171,26 @@ export async function runAgent(options: {
   return payload;
 }
 
+export async function compactMessages(options: {
+  model: string;
+  messages: AgentMessage[];
+  api_path?: string;
+}): Promise<AgentCompactResponse> {
+  const payload = await requestJson<AgentCompactResponse>("/v1/agent/compact", {
+    method: "POST",
+    body: JSON.stringify({
+      model: options.model,
+      messages: options.messages,
+      ...(options.api_path ? { api_path: options.api_path } : {}),
+    }),
+  });
+
+  if (!payload?.ok) throw new Error(payload?.detail || payload?.error || "压缩上下文失败");
+  return payload;
+}
+
 function isAgentStreamEventName(value: unknown): value is AgentStreamEventName {
-  return value === "reasoning_delta" || value === "model_delta" || value === "turn_start" || value === "tool_call" || value === "tool_result" || value === "context_warning" || value === "ask_user" || value === "final" || value === "error";
+  return value === "reasoning_delta" || value === "model_delta" || value === "turn_start" || value === "tool_call" || value === "tool_result" || value === "context_warning" || value === "ask_user" || value === "turn_pause" || value === "final" || value === "error";
 }
 
 function parseAgentStreamFrame(frame: string): AgentStreamEvent | null {

@@ -3,13 +3,14 @@ import { Bot } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { fetchModels, resolveDeclaredTools, runAgent, runAgentStream, type AgentMessage } from "@/lib/agent-api";
+import { compactMessages, fetchModels, resolveDeclaredTools, runAgent, runAgentStream, type AgentMessage } from "@/lib/agent-api";
 import { loadChatState, saveChatState } from "@/lib/chat-store";
 import { AssistantPage } from "./assistant";
 import { AutomationPage } from "./automation";
 import { ChatPage } from "./chat";
-import { AGENT_INSTRUCTIONS, AUTO_TITLE_ENABLED, DEFAULT_ASSISTANTS, THEMES, THEME_KEY, THEME_MODE_KEY } from "./constants";
-import { clearModalResidue, extractTextContent, messageText, normalizeStoredState, nowTime, toAgentMessages, toChatModel } from "./helpers";
+import { AGENT_INSTRUCTIONS, AUTO_TITLE_ENABLED, COMPACT_KEEP_RECENT, DEFAULT_ASSISTANTS, THEMES, THEME_KEY, THEME_MODE_KEY } from "./constants";
+import { clearModalResidue, extractTextContent, messageText, normalizeStoredState, nowTime, sessionRefsToContextMessages, toAgentMessages, toChatModel } from "./helpers";
+import { BUILTIN_SKILLS } from "./skills";
 import { Lightbox, PreviewContext } from "./preview";
 import { Sidebar } from "./sidebar";
 import { applyTheme, ThemeContext } from "./theme";
@@ -31,6 +32,11 @@ export default function App() {
   const [allMessages, setAllMessages] = useState<Record<string, Message[]>>({});
   // 当前正在进行的流式回复对应的中断控制器；用户点击"停止"时 abort 该请求。
   const activeRequestRef = useRef<AbortController | null>(null);
+  // 回复进行中用户输入的"中途引导"：内容、附件、工具开关。流式回复在每个自然停顿点
+  // （后端 turn_pause 事件）到来时自动插入，避免打断半截残话。cancel 后清空。
+  const pendingGuideRef = useRef<{ content: string; attachments: File[]; tools: string[] } | null>(null);
+  // 挂起引导的文本预览（用于输入区提示条展示）；空表示当前没有挂起引导。
+  const [pendingGuide, setPendingGuide] = useState<string>("");
   const [models, setModels] = useState<ChatModel[]>([]);
   const [selectedModel, setSelectedModel] = useState<ChatModel | null>(null);
   const [modelsLoading, setModelsLoading] = useState(true);
@@ -232,7 +238,9 @@ export default function App() {
     if (messageCount >= 10 && messageCount % 10 === 0) void generateSessionTitle(sessionId);
   };
 
-  const requestAgent = async (sessionId: string, userMessageId: string, assistantMessageId: string, requestHistory: Message[], files: File[] = [], tools: string[] = [], baseMessages?: AgentMessage[]) => {
+  const requestAgent = async (sessionId: string, userMessageId: string, assistantMessageId: string, requestHistory: Message[], files: File[] = [], tools: string[] = [], baseMessages?: AgentMessage[], injected: AgentMessage[] = []) => {
+    // injected 为引用会话（$ + 会话名）整理出的上下文消息：拼在历史之前，
+    // 让模型能看到被引用会话的对话记录。仅在首次发送时由 sendMessage 传入。
     // baseMessages 为 akm_ask_user 续跑时后端返回的完整工作消息：回答会追加在其后，
     // 让同一轮 Agent 在原有上下文上继续，而不是另起新会话。
     // 为本次流式请求创建中断控制器：点击"停止"时 abort，前端停止读取流，
@@ -345,7 +353,7 @@ export default function App() {
       for await (const event of runAgentStream({
         model: modelKey,
         // 续跑时把后端返回的工作消息作为基底，再追加当前请求的会话消息。
-        messages: baseMessages ? [...baseMessages, ...toAgentMessages(requestHistory)] : toAgentMessages(requestHistory),
+        messages: baseMessages ? [...baseMessages, ...injected, ...toAgentMessages(requestHistory)] : [...injected, ...toAgentMessages(requestHistory)],
         instructions: (sessions.find(session => session.id === sessionId)?.instructions ?? AGENT_INSTRUCTIONS) + searchHint + imageHint,
         tools: declaredTools.length ? declaredTools : undefined,
         files,
@@ -409,6 +417,35 @@ export default function App() {
             multiple: Boolean(event.data.multiple),
             messages: event.data.messages ?? [],
           };
+        } else if (event.event === "turn_pause") {
+          // 自然停顿点：当前轮 LLM 输出（正文/思考）已完整收尾。若用户在回复过程中
+          // 输入了"中途引导"（pendingGuideRef 有值），在此中断当前轮，用后端返回的
+          // 工作消息快照（event.data.messages）作为基底，追加引导消息后续跑——避免
+          // 打断半截残话，也让换方向/补充内容从完整上下文继续。无引导时忽略该事件。
+          if (pendingGuideRef.current) {
+            finalizeStream();
+            const guide = pendingGuideRef.current;
+            pendingGuideRef.current = null;
+            setPendingGuide("");
+            // 构造引导用户消息：追加进会话（状态即成功，后续续跑沿用其历史）。
+            const guideMessage: Message = {
+              id: `${sessionId}-user-${Date.now()}`,
+              role: "user",
+              content: guide.content,
+              time: nowTime(),
+              status: "success",
+              files: guide.attachments.length ? guide.attachments.map(file => ({
+                name: file.name, type: file.type, size: file.size,
+                previewUrl: file.type.startsWith("image/") ? URL.createObjectURL(file) : undefined,
+              })) : undefined,
+            };
+            setAllMessages(prev => ({ ...prev, [sessionId]: [...(prev[sessionId] ?? []), guideMessage] }));
+            // 先中断当前流（接下来的读取会抛 AbortError，走 catch 正常收尾，保留已输出内容），
+            // 再用快照 + 引导消息续跑新一轮请求。
+            controller.abort();
+            const sessionTools = sessions.find(session => session.id === sessionId)?.tools ?? [];
+            void requestAgent(sessionId, guideMessage.id, `${sessionId}-assistant-${Date.now()}`, [guideMessage], guide.attachments, guide.tools, event.data.messages ?? []);
+          }
         } else if (event.event === "error") {
           throw new Error(event.data.error || "Agent 请求失败");
         } else if (event.event === "final") {
@@ -500,11 +537,16 @@ export default function App() {
     }
   };
 
-  const sendMessage = (content: string, attachments: File[] = [], tools: string[] = []) => {
-    // 当前会话仍有发送中/生成中的消息时禁止再发，防止并发请求打乱上下文
+  const sendMessage = (content: string, attachments: File[] = [], tools: string[] = [], skillRef?: { id: string; name: string }, sessionRefs: { id: string; title: string }[] = []) => {
+    // 当前会话仍有发送中/生成中的消息：不立即发送，而是把输入暂存为"中途引导"，
+    // 等后端在自然停顿点（turn_pause 事件）下发时自动中断当前轮并插入续跑。
     const sessionId = activeSession || `new-${Date.now()}`;
     const existing = allMessages[sessionId] ?? [];
-    if (existing.some(message => message.status === "sending")) return;
+    if (existing.some(message => message.status === "sending")) {
+      pendingGuideRef.current = { content, attachments, tools };
+      setPendingGuide(content || (attachments.length ? attachments.map(file => file.name).join(", ") : ""));
+      return;
+    }
 
     const id = `${sessionId}-user-${Date.now()}`;
     const message: Message = {
@@ -513,6 +555,10 @@ export default function App() {
         name: file.name, type: file.type, size: file.size,
         previewUrl: file.type.startsWith("image/") ? URL.createObjectURL(file) : undefined,
       })) : undefined,
+      // skillRef 本期仅用于气泡短引用展示（skill 模板展开后续落地）；
+      // sessionRefs 会在发送时把被引用会话历史作为上下文注入（见 requestAgent 的 injected 参数）。
+      ...(skillRef ? { skillRef } : {}),
+      ...(sessionRefs && sessionRefs.length > 0 ? { sessionRefs } : {}),
     };
     const requestHistory = [...existing, message];
     setAllMessages(prev => ({ ...prev, [sessionId]: [...(prev[sessionId] ?? []), message] }));
@@ -523,11 +569,46 @@ export default function App() {
       return prev.map(session => session.id === sessionId && session.title === "新对话" ? { ...session, title: content.slice(0, 22), autoTitled: true } : session);
     });
     if (!activeSession) setActiveSession(sessionId);
-    void requestAgent(sessionId, id, `${sessionId}-assistant-${Date.now()}`, requestHistory, attachments, tools);
+    // skill 若声明了强制工具（如生图的 image），本轮并入请求工具声明（不回写会话开关）。
+    const skill = skillRef ? BUILTIN_SKILLS.find(candidate => candidate.id === skillRef.id) : undefined;
+    const requestTools = skill?.tools?.length ? Array.from(new Set([...tools, ...skill.tools])) : tools;
+    void requestAgent(sessionId, id, `${sessionId}-assistant-${Date.now()}`, requestHistory, attachments, requestTools, undefined, sessionRefs?.length ? sessionRefsToContextMessages(sessionRefs, allMessages) : []);
   };
 
   // 中断当前正在生成的回复：abort 流式请求，保留已输出内容并收尾。
   const stopReply = () => { activeRequestRef.current?.abort(); };
+
+  // 手动压缩当前会话上下文（/compact）：把较早的对话交由后端 LLM 归纳成摘要，
+  // 用一条"摘要提示消息"替换早期消息，保留最近 COMPACT_KEEP_RECENT 条原始消息，
+  // 返回 promise<string | null>：null 表示成功，字符串为滚动展示的错误信息。
+  const handleCompact = async (): Promise<string | null> => {
+    const sessionId = activeSession;
+    if (!sessionId) return "没有选中的会话";
+    const list = allMessages[sessionId] ?? [];
+    const messages = toAgentMessages(list);
+    if (messages.length === 0) return "会话暂无消息，无需压缩";
+    const modelKey = selectedModel?.key;
+    if (!modelKey) return "尚未选择模型";
+    try {
+      const result = await compactMessages({ model: modelKey, messages });
+      if (!result.ok) throw new Error(result.detail || result.error || "压缩失败");
+      // 摘要内容缺失时（如无模型可摘要）用默认文案占位，让用户知道已完成一轮压缩。
+      const summary = result.summary || "（后端未能生成摘要，已直接截断较早消息）";
+      const summaryMessage: Message = {
+        id: `${sessionId}-compact-${Date.now()}`,
+        role: "assistant",
+        content: summary,
+        time: nowTime(),
+        status: "success",
+        compactSummary: true,
+      };
+      const tail = list.slice(-COMPACT_KEEP_RECENT);
+      setAllMessages(prev => ({ ...prev, [sessionId]: [summaryMessage, ...tail] }));
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : "压缩上下文失败";
+    }
+  };
 
   // 用户回答 AI 的澄清问题（akm_ask_user）：把回答作为新用户消息追加，
   // 并用后端返回的完整工作消息（ask.messages）作为基底续跑同一轮 Agent。
@@ -623,8 +704,8 @@ export default function App() {
     if (activePage === "automation") return <AutomationPage sidebarOpen={sidebarOpen} onToggle={() => setSidebarOpen(value => !value)} models={models} defaultModelKey={selectedModel?.key ?? ""} />;
     if (activePage === "workflow") return <WorkflowPage sidebarOpen={sidebarOpen} onToggle={() => setSidebarOpen(value => !value)} models={models} />;
     if (activePage === "assistant") return <AssistantPage sidebarOpen={sidebarOpen} onToggle={() => setSidebarOpen(value => !value)} assistants={assistants} onAdd={(name, prompt) => setAssistants(prev => [{ id: `custom-${Date.now()}`, name, description: prompt, prompt, icon: Bot, color: "bg-primary/10 text-primary" }, ...prev])} onEdit={(id, name, prompt) => setAssistants(prev => prev.map(assistant => assistant.id === id ? { ...assistant, name, ...(prompt ? { prompt, description: prompt } : {}) } : assistant))} onStart={assistantId => { const assistant = assistants.find(candidate => candidate.id === assistantId); const assistantName = assistant?.name ?? "助手"; const sessionId = `${assistantId}-${Date.now()}`; const message: Message = { id: `${assistantId}-message`, role: "user", content: `你好，请以「${assistantName}」的身份来帮我。`, time: nowTime(), status: "success" }; setSessions(prev => [{ id: sessionId, title: assistantName, time: nowTime(), ...(assistant?.prompt ? { instructions: assistant.prompt } : {}) }, ...prev]); setAllMessages(prev => ({ ...prev, [sessionId]: [message] })); setActiveSession(sessionId); setActivePage("chat"); }} onDelete={assistantId => setAssistants(prev => prev.filter(assistant => assistant.id !== assistantId))} />;
-    return <ChatPage session={activeSessionData} messages={messages} model={selectedModel} models={models} modelsLoading={modelsLoading} modelsError={modelsError} sidebarOpen={sidebarOpen} onToggleSidebar={() => setSidebarOpen(value => !value)} onModelChange={model => { setSelectedModel(model); if (activeSession) setSessions(prev => prev.map(session => session.id === activeSession ? { ...session, modelKey: model.key } : session)); }} onReloadModels={() => { void loadModels(); }}     onSend={(contentValue, attachments, tools) => sendMessage(contentValue, attachments, tools)} onRetry={retryMessage} onStop={stopReply} onAnswer={answerQuestion} tools={activeSessionData?.tools ?? []} onToolsChange={tools => { if (!activeSession) return; setSessions(prev => prev.map(session => session.id === activeSession ? { ...session, tools } : session)); }} />;
-  }, [activePage, activeSessionData, allMessages, messages, models, modelsLoading, modelsError, selectedModel, sidebarOpen, assistants]);
+    return <ChatPage session={activeSessionData} sessions={sessions} messages={messages} model={selectedModel} models={models} modelsLoading={modelsLoading} modelsError={modelsError} sidebarOpen={sidebarOpen} onToggleSidebar={() => setSidebarOpen(value => !value)} onModelChange={model => { setSelectedModel(model); if (activeSession) setSessions(prev => prev.map(session => session.id === activeSession ? { ...session, modelKey: model.key } : session)); }} onReloadModels={() => { void loadModels(); }}     onSend={(contentValue, attachments, tools, skillRef, sessionRefs) => sendMessage(contentValue, attachments, tools, skillRef, sessionRefs)} onNewSession={newSession} onRetry={retryMessage} onStop={stopReply} onAnswer={answerQuestion} onCompact={handleCompact} tools={activeSessionData?.tools ?? []} onToolsChange={tools => { if (!activeSession) return; setSessions(prev => prev.map(session => session.id === activeSession ? { ...session, tools } : session)); }} pendingGuide={pendingGuide} onCancelGuide={() => { pendingGuideRef.current = null; setPendingGuide(""); }} />;
+  }, [activePage, activeSessionData, allMessages, messages, models, modelsLoading, modelsError, selectedModel, sidebarOpen, assistants, sessions]);
 
   return (
     <PreviewContext.Provider value={{ openPreview: setPreviewUrl }}>

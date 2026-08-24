@@ -16,6 +16,10 @@ const AGENT_INSTRUCTIONS = "你是 AetherAI 内置助手，请用中文回复，
 // 默认关闭（false），避免每次会话额外消耗一次模型请求；改为 true 可开启。
 const AUTO_TITLE_ENABLED = false;
 
+// 手动压缩上下文（/compact）后保留的最近原始消息条数：
+// 较早的对话由后端归纳成摘要并以"摘要提示消息"替换，只保留尾部这最近几条。
+const COMPACT_KEEP_RECENT = 10;
+
 const THEME_MODES: { key: ThemeMode; label: string; icon: LucideIcon }[] = [
   { key: "system", label: "跟随系统", icon: Monitor },
   { key: "light", label: "浅色", icon: Sun },
@@ -44,4 +48,4 @@ const DEFAULT_ASSISTANTS: AssistantDef[] = [
   { id: "coder", name: "编码助手", description: "分析代码、定位问题，给出可落地的实现建议。", icon: Cpu, color: "bg-emerald-100 text-emerald-600" },
 ];
 
-export { THEME_MODE_KEY, THEME_KEY, AGENT_INSTRUCTIONS, AUTO_TITLE_ENABLED, THEME_MODES, THEMES, QUICK_PROMPTS, DEFAULT_ASSISTANTS };
+export { THEME_MODE_KEY, THEME_KEY, AGENT_INSTRUCTIONS, AUTO_TITLE_ENABLED, COMPACT_KEEP_RECENT, THEME_MODES, THEMES, QUICK_PROMPTS, DEFAULT_ASSISTANTS };

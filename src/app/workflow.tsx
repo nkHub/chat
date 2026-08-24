@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
-import { Background, BackgroundVariant, Controls, Handle, Position, ReactFlow, addEdge, useEdgesState, useNodesState, type Connection, type Edge, type Node, type NodeProps, type NodeTypes } from "@xyflow/react";
+import { Background, BackgroundVariant, BaseEdge, Controls, Handle, MarkerType, Position, ReactFlow, addEdge, useEdgesState, useNodesState, type Connection, type Edge, type EdgeProps, type EdgeTypes, type Node, type NodeProps, type NodeTypes } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { createWorkflow, deleteWorkflow, instantiateFlowTemplate, listFlowTemplates, listWorkflows, updateWorkflow, type FlowNodeType, type NodeExecutor, type Workflow, type WorkflowEdge, type WorkflowNode, type WorkflowNodeData } from "@/lib/agent-api";
 import { clearModalResidue, formatDisplayTime } from "./helpers";
@@ -56,6 +56,84 @@ type CanvasNode = Node<WorkflowNodeData & { nodeType: FlowNodeType }>;
 // 画布边：condition/loop 等业务字段放在 data 里（React Flow 的边也支持 data）。
 type CanvasEdge = Edge<{ condition?: string; loop?: boolean }>;
 
+// 边样式语义常量：普通线 vs 条件分支 vs 回边（loop）三种形态，用于让"不同的线长得不同"。
+// - 普通边   ：Bezier 平滑曲线（主线，细）；
+// - 条件边   ：强调色 + 箭头 + 稍粗，衬托 BrAnch 路线的存在；
+// - 回边 loop：深色虚线 + 箭头，用于区分有界迭代回边（不计入环检测）。
+// 全部走 EdgeInsets 处于选中态时用高亮描边（见 DrawEdge）。
+const EDGE_STYLE = {
+  default: { stroke: "#a1a1aa", strokeWidth: 1.2 },
+  condition: { stroke: "#8b5cf6", strokeWidth: 1.8, strokeDasharray: "6 4" },
+  loop: { stroke: "#52525b", strokeWidth: 1.5, strokeDasharray: "4 3" },
+} as const;
+
+// 根据边的业务数据（condition/loop）挑选语义样式类；无特征则走默认。
+function edgeSemantic(edge: { data?: CanvasEdge["data"] }): keyof typeof EDGE_STYLE {
+  if (edge.data?.loop) return "loop";
+  if (edge.data?.condition) return "condition";
+  return "default";
+}
+
+// 由语义 + 源/目标节点位置推导边的渲染参数：
+// style（颜色/粗细/虚线）、type（走线方式）、markerEnd（箭头）、命中宽度、端口。
+// - 普通边  ：smoothstep 直角平滑折线，规整不缠绕；
+// - 条件边  ：smoothstep + 强调紫 + 虚线 + 箭头，衬托分支存在；
+// - 回边loop：loopFlow 自定义绕行边（深色虚线 + 箭头）。回路不再在节点组中间挤，而是由
+//   LoopFlowEdge 统一拐到画布外侧绕行（见 LoopFlowEdge），故回边固定走 loop-out 底部 → loop-in 顶部，
+//   不与其它连线/模块重叠。
+// 端口策略（普通/条件边）：统一按两端节点在画布上的实际相对位置选端口——
+// 当"垂直排列"（|dy| > |dx|）时，若仍从左右主端口绕行会产生横跨画布的 U 形大圈，
+// 因此改走上下端口（loop-out 底部 / loop-in 顶部）垂直连线，形成紧凑回环；
+// 否则（水平/斜对角排列）走左右主端口（source 右 / target 左），避免斜抛线横穿画布。
+function edgeOptionByData(
+  edge: CanvasEdge,
+  sourcePos?: { x: number; y: number },
+  targetPos?: { x: number; y: number },
+): {
+  type: "smoothstep" | "bezier" | "loopFlow";
+  style: React.CSSProperties;
+  markerEnd?: { type: MarkerType; color: string };
+  interactionWidth: number;
+  sourceHandle?: string;
+  targetHandle?: string;
+} {
+  const semantic = edgeSemantic(edge);
+  const style = EDGE_STYLE[semantic];
+  const markerEnd = semantic !== "default" ? { type: MarkerType.ArrowClosed, color: style.stroke } : undefined;
+  // 回边 loop：固定走自定义绕行边（LoopFlowEdge），源端口统一 loop-out(底)。
+  // 目标端口按两端"垂直/水平"排布二选一——垂直排布走顶部 loop-in（两者间紧凑回环），
+  // 水平/相邻排布走底部 loop-in-bottom（节点带下方 U 形），由 LoopFlowEdge 据此画出不穿盒子的绕行路径。
+  if (semantic === "loop") {
+    const loopVertical = !!sourcePos && !!targetPos && Math.abs(targetPos.y - sourcePos.y) > Math.abs(targetPos.x - sourcePos.x);
+    return {
+      type: "loopFlow",
+      style,
+      ...(markerEnd ? { markerEnd } : {}),
+      interactionWidth: 24,
+      sourceHandle: "loop-out",
+      targetHandle: loopVertical ? "loop-in" : "loop-in-bottom",
+    };
+  }
+  // 垂直倾向判定：dy 明显大于 dx 时视为"上下排布"，走上下端口，避免左右横跨绕大圈。
+  const vertical = !!sourcePos && !!targetPos && Math.abs(targetPos.y - sourcePos.y) > Math.abs(targetPos.x - sourcePos.x);
+  const useVertical = vertical;
+  // 优先尊重用户手动指定的端口（手动连线产物）；否则按语义决定。
+  const port =
+    useVertical
+      ? { sourceHandle: "loop-out", targetHandle: "loop-in" }
+      : {
+          ...(edge.sourceHandle ? { sourceHandle: edge.sourceHandle } : { sourceHandle: "source" }),
+          ...(edge.targetHandle ? { targetHandle: edge.targetHandle } : { targetHandle: "target" }),
+        };
+  return {
+    type: "smoothstep",
+    style,
+    ...(markerEnd ? { markerEnd } : {}),
+    interactionWidth: 24,
+    ...port,
+  };
+}
+
 // WorkflowNode[] → 画布节点[]：把 type 合并进 data.nodeType。
 // position 缺失（旧数据或后端未返回）时兜底为原点，避免 ReactFlow 读取 position.x 白屏。
 function toCanvasNodes(nodes: WorkflowNode[]): CanvasNode[] {
@@ -98,7 +176,15 @@ const WorkflowCanvasNode = memo(({ data, selected }: NodeProps<CanvasNode>) => {
       "min-w-[180px] max-w-[240px] rounded-xl border bg-card px-3 py-2 shadow-sm transition-shadow",
       selected ? "border-primary ring-2 ring-primary/30" : "border-border",
     )}>
-      <Handle type="target" position={Position.Left} className="!h-2 !w-2 !border-0 !bg-muted-foreground" />
+      {/* 主进/出口：常规边从左侧 target 进、右侧 source 出，走横平竖直的 smoothstep。 */}
+      <Handle type="target" position={Position.Left} id="target" className="!h-2 !w-2 !border-0 !bg-muted-foreground" />
+      {/* 回边 loop 专用端口：
+          - loop-out（底部，源）：所有 loop 回边统一从源节点底部出发；
+          - loop-in（顶部，目标）：用于"垂直排布"的两节点，回环在两者之间走（紧凑）；
+          - loop-in-bottom（底部，目标）：用于"水平/相邻"排布，回环在节点带下方绕 U 形（不穿盒子）。 */}
+      <Handle type="source" position={Position.Bottom} id="loop-out" className="!h-1.5 !w-1.5 !border-0 !bg-muted-foreground/70" />
+      <Handle type="target" position={Position.Top} id="loop-in" className="!h-1.5 !w-1.5 !border-0 !bg-muted-foreground/70" />
+      <Handle type="target" position={Position.Bottom} id="loop-in-bottom" className="!h-1.5 !w-1.5 !border-0 !bg-muted-foreground/70" />
       <div className="flex items-center gap-1.5">
         <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: meta.color }} />
         <span className="min-w-0 flex-1 truncate text-xs font-semibold text-foreground">{data.label || meta.label}</span>
@@ -108,13 +194,50 @@ const WorkflowCanvasNode = memo(({ data, selected }: NodeProps<CanvasNode>) => {
         <span className="rounded bg-muted px-1 py-px text-[10px] text-muted-foreground">{executorText}</span>
         {data.modelId ? <span className="min-w-0 flex-1 truncate text-right text-[10px] text-muted-foreground/70">{data.modelId}</span> : null}
       </div>
-      <Handle type="source" position={Position.Right} className="!h-2 !w-2 !border-0 !bg-muted-foreground" />
+      <Handle type="source" position={Position.Right} id="source" className="!h-2 !w-2 !border-0 !bg-muted-foreground" />
     </div>
   );
 });
 
-// React Flow 自定义节点注册表：flowNode 用于渲染业务节点。
+// 回边（loop）专用边：让有界迭代的回路在节点带外侧绕行，避免在节点组中间挤成乱线、不穿过任何节点盒。
+// 按目标端口所在位置分两种绕法（source 始终是源节点底部 loop-out）：
+// - 目标在顶部（loop-in，垂直排布）：源在目标下方且 x 重叠时中间无横向逃逸带，单条贝塞尔必然穿盒。
+//   改用多段直角折线绕行——先竖直下探、再横向绕出源/目标盒的 x 范围、竖直升到目标盒上方、最后横向进入
+//   目标顶部端口，全程走在节点盒外的空白带，不穿任何模块、也不压其它连线。
+// - 目标在底部（loop-in-bottom，水平/相邻排布）：回路整体绕到节点带**下方**的空白区，从源底拐出、
+//   经下凸的 U 形再折回目标底部，主体落在所有节点盒之下方，天然不与其它连线/模块重叠。
+function LoopFlowEdge({ id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, style, markerEnd, interactionWidth, data }: EdgeProps) {
+  const span = Math.hypot(targetX - sourceX, targetY - sourceY);
+  const depth = Math.max(span * 0.9, 90);
+  let path: string;
+  if (targetPosition === Position.Top) {
+    // 垂直排布：源在目标下方且 x 重叠（两盒正上下相邻，中间无横向逃逸带）。
+    // 单条三次贝塞尔必然在 y 跨中间带时横穿重叠 x 带、穿入源/目标盒内。故改用多段折线绕行：
+    // 从源底部竖直下探 → 横向移出源/目标盒的 x 范围（绕到目标一侧外侧）→ 竖直升到目标盒上方 → 再横向进入目标顶部端口。
+    // 绕行量基于源/目标盒的实测尺寸：横向绕「盒半宽 + 20」保证竖直段落在两盒 x 范围之外，
+    // 纵向下探/上探「盒半高 + 20」保证折线主体在盒外；既不出巨型矩形框，也不侵入左侧相邻节点。
+    // 尺寸由 displayEdges 随 data 传入（flow 单位，来自 React Flow measured），缺省 187×55。
+    const d = data as { sourceWidth?: number; sourceHeight?: number; targetWidth?: number; targetHeight?: number } | undefined;
+    const halfW = Math.max(d?.sourceWidth ?? 187, d?.targetWidth ?? 187) / 2;
+    const halfH = Math.max(d?.sourceHeight ?? 55, d?.targetHeight ?? 55) / 2;
+    const sideX = Math.min(sourceX, targetX) - (halfW + 20);
+    const lowY = Math.max(sourceY, targetY) + (halfH + 20);
+    const highY = Math.min(sourceY, targetY) - (halfH + 20);
+    path = `M ${sourceX},${sourceY} L ${sourceX},${lowY} L ${sideX},${lowY} L ${sideX},${highY} L ${targetX},${highY} L ${targetX},${targetY}`;
+  } else {
+    // 水平/相邻排布：节点带下方绕下凸 U 形，主体远离盒子上沿。
+    // 控制点沿两端连线方向带横向偏移，让弧线从源底出发即朝目标方向平滑弯曲，
+    // 避免「竖直下落再钩回」的僵硬折角，形成流畅的 C/U 形。
+    const dx = targetX - sourceX;
+    path = `M ${sourceX},${sourceY} C ${sourceX + dx * 0.4},${sourceY + depth} ${targetX - dx * 0.4},${targetY + depth} ${targetX},${targetY}`;
+  }
+  return <BaseEdge id={id} path={path} style={style} markerEnd={markerEnd} interactionWidth={interactionWidth} />;
+}
+
+// React Flow 节点类型注册表：flowNode 用于渲染业务节点。
 const workflowNodeTypes: NodeTypes = { flowNode: WorkflowCanvasNode };
+// React Flow 边类型注册表：loopFlow 用于渲染回边（loop）的绕行路径。
+const workflowEdgeTypes: EdgeTypes = { loopFlow: LoopFlowEdge };
 
 // 工作流页面：展示工作流列表，支持新建/编辑（弹窗内配置节点参数，字段组织参考 flow 配置页）、删除。
 // 当前使用本地假数据（DEFAULT_WORKFLOWS），后续 ccs /v1/flow 稳定后切换到真实 API。
@@ -171,6 +294,33 @@ function WorkflowEditor({ models, initial, onCancel, onSave }: {
 
   const selectedNode = rfNodes.find(node => node.id === selectedNodeId) ?? null;
   const selectedEdge = rfEdges.find(edge => edge.id === selectedEdgeId) ?? null;
+
+  // 用于渲染的边集合：在状态边基础上套用语义样式（type/style/markerEnd/interactionWidth/端口）。
+  // 需传入源/目标节点位置以判断边是"上下排布"还是"左右排布"，从而选择正确的连接端口，
+  // 避免上下对齐的节点间连线横跨画布绕出 U 形大圈。
+  // 提交保存时仍走原始 rfEdges（保留 condition/loop 业务字段），派生副本仅为展示，二者独立。
+  const displayEdges = useMemo(() => {
+    const nodePos = new Map(rfNodes.map(node => [node.id, node.position]));
+    const nodeSize = new Map(rfNodes.map(node => [node.id, node.measured]));
+    return rfEdges.map(edge => {
+      const opts = edgeOptionByData(edge, nodePos.get(edge.source), nodePos.get(edge.target));
+      // loop 回边需要真实盒尺寸来精确绕行（竖直排布时绕出源/目标盒的 x 范围），把实测尺寸随 data 传给 LoopFlowEdge。
+      if (opts.type !== "loopFlow") return { ...edge, ...opts };
+      const s = nodeSize.get(edge.source);
+      const t = nodeSize.get(edge.target);
+      return {
+        ...edge,
+        ...opts,
+        data: {
+          ...edge.data,
+          sourceWidth: s?.width ?? 187,
+          sourceHeight: s?.height ?? 55,
+          targetWidth: t?.width ?? 187,
+          targetHeight: t?.height ?? 55,
+        },
+      };
+    });
+  }, [rfNodes, rfEdges]);
 
   // 连线：新增边时补一个稳定 id，避免 React Flow 的占位 id 导致 key 不稳定。
   const onConnect = (connection: Connection) => {
@@ -273,7 +423,7 @@ function WorkflowEditor({ models, initial, onCancel, onSave }: {
         <div className="min-w-0 flex-1 bg-background">
           <ReactFlow
             nodes={rfNodes}
-            edges={rfEdges}
+            edges={displayEdges}
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
@@ -281,7 +431,8 @@ function WorkflowEditor({ models, initial, onCancel, onSave }: {
             onEdgeClick={(_, edge) => { setSelectedEdgeId(edge.id); setSelectedNodeId(null); }}
             onPaneClick={() => { setSelectedNodeId(null); setSelectedEdgeId(null); }}
             nodeTypes={workflowNodeTypes}
-            defaultEdgeOptions={{ style: { stroke: "#52525b", strokeWidth: 1.5 } }}
+            edgeTypes={workflowEdgeTypes}
+            defaultEdgeOptions={{ type: "smoothstep", style: EDGE_STYLE.default, interactionWidth: 24 }}
             fitView
             proOptions={{ hideAttribution: true }}
           >

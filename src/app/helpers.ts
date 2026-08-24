@@ -1,6 +1,7 @@
 import { isValidElement, type ReactElement, type ReactNode } from "react";
 import type { AgentMessage, ApiModel } from "@/lib/agent-api";
 import type { ChatModel, Message, StoredChatState } from "./types";
+import { BUILTIN_SKILLS } from "./skills";
 
 // 规范化从存储层读出的聊天状态：
 // 迁移旧数据：会话时间跟随最后一条消息的时间（空会话保留创建时间），
@@ -109,7 +110,67 @@ function toAgentMessages(messages: Message[]): AgentMessage[] {
   return messages
     .filter(message => message.role === "user" || message.role === "assistant")
     .filter(message => message.status !== "send_failed" && message.status !== "recv_failed")
-    .map(message => ({ role: message.role, content: message.content }));
+    .map(message => {
+      // 用户消息携带 skill 引用（chip）：把对应 Skill 的模板展开成实际发给模型的内容，
+      // {{input}} 替换为用户原文（如「翻译」→「请把下面的内容翻译成…需要翻译的内容：原文」）。
+      // 会话气泡内仍展示原文，只有发往模型的正文是展开后的约束文本。
+      if (message.role === "user" && message.skillRef) {
+        const skill = BUILTIN_SKILLS.find(candidate => candidate.id === message.skillRef!.id);
+        if (skill?.template && message.content.trim()) {
+          return { role: "user", content: skill.template.replace("{{input}}", message.content.trim()) };
+        }
+      }
+      return { role: message.role, content: message.content };
+    });
+}
+
+// 把引用的会话历史整理成一段整体注入的"引用资料"消息（role:user）：
+// - 开头显式声明：下列内容来自其它会话，是背景参考资料，不属于当前对话的历史轮次，
+//   避免模型把引用内容与当前对话原始轮次混淆；
+// - 每个会话块用分隔行包住，并附带 session_id，提示可用 akm_load_session 按 id 加载更完整内容；
+// - 限制每会话最近条数、单块字符与总字符量，避免撑爆上下文。
+function sessionRefsToContextMessages(refs: { id: string; title: string }[], all: Record<string, Message[]>, maxMessages = 12, maxChars = 4000, totalChars = 8000): AgentMessage[] {
+  const blocks: string[] = [];
+  let budget = totalChars;
+  for (const ref of refs) {
+    const list = (all[ref.id] ?? [])
+      .filter(message => (message.role === "user" || message.role === "assistant") && message.status !== "send_failed" && message.status !== "recv_failed");
+    const lines: string[] = [];
+    let chars = 0;
+    for (const message of list.slice(-maxMessages)) {
+      const text = messageText(message).trim();
+      if (!text) continue;
+      const line = `${message.role === "user" ? "用户" : "助手"}: ${text}`;
+      if (chars + line.length > maxChars) break;
+      lines.push(line);
+      chars += line.length;
+    }
+    // 明确标注实际注入的条数（可能因字符上限而少于 maxMessages），让模型知晓取的是最近几轮。
+    const count = lines.length;
+    const body = count > 0 ? `以下为该会话最近 ${count} 条对话记录：\n${lines.join("\n\n")}` : "该会话当前无文本记录。";
+    const block = [
+      `[引用会话「${ref.title}」（session_id: ${ref.id}）]`,
+      body,
+      `若需查看该会话更完整上下文，可调用 akm_load_session 工具，传 session_id=${ref.id}。`,
+    ].join("\n");
+    // 总预算不足则裁剪掉更靠后的引用块。
+    if (block.length > budget) break;
+    blocks.push(block);
+    budget -= block.length;
+  }
+  if (!blocks.length) return [];
+  // 聚合为单条资料消息：与后续真实对话轮次物理隔开，声明其"外部引用"属性。
+  return [{
+    role: "user",
+    content: [
+      "【引用资料 — 非当前对话】",
+      "以下内容来自用户引用的其它会话，仅作为背景参考资料提供，",
+      "不属于当前对话的历史轮次，请勿把它们当作本次对话的原始对话内容。",
+      "",
+      blocks.join("\n\n----------\n\n"),
+      "【引用资料结束】",
+    ].join("\n"),
+  }];
 }
 
 // 清除 Radix modal 可能残留的背景滚动/交互锁定（body/html 的 overflow 与 pointer-events），避免页面无法滚动/点击。
@@ -130,4 +191,4 @@ function nodeToText(node: ReactNode): string {
   return "";
 }
 
-export { normalizeStoredState, toChatModel, nowTime, formatDisplayTime, formatRelativeTime, extractTextContent, messageText, toAgentMessages, clearModalResidue, nodeToText };
+export { normalizeStoredState, toChatModel, nowTime, formatDisplayTime, formatRelativeTime, extractTextContent, messageText, toAgentMessages, sessionRefsToContextMessages, clearModalResidue, nodeToText };
