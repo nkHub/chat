@@ -546,8 +546,27 @@ function ChatPage({
             rows={1}
             // 回复进行中也可继续输入：输入的内容会作为"中途引导"被挂起（见 pendingGuide），
             // 待当前轮 LLM 输出完整收尾时自动插入，而不是强制等整轮结束。
-            placeholder={isReplyPending ? "回复生成中，可输入引导，将在自然停顿时插入…" : "发送消息… (Shift+Enter 换行)"}
-onPaste={event => {
+placeholder={isReplyPending ? "回复生成中，可输入引导，将在自然停顿时插入…" : "发送消息… (Shift+Enter 换行)"}
+            // 支持拖拽图片/文件进输入框：与"附件"按钮共用 appendAttachmentFiles，走同一条附件上传链路，
+            // 否则默认行为是浏览器直接打开文件，发送消息时 AI 拿不到该文件。
+            onDragOver={event => {
+              // 仅对携带文件的拖拽阻止默认（避免浏览器把文件当导航打开）；
+              // 纯文本 / 链接等拖拽不拦截，保持浏览器默认插入行为，避免显示为空内容。
+              if (Array.from(event.dataTransfer.types).includes("Files")) event.preventDefault();
+            }}
+            onDrop={event => {
+              const files = Array.from(event.dataTransfer.files ?? []);
+              if (files.length === 0) {
+                // 无文件时放行给浏览器默认处理；但拖入的纯文本若为空白（如空段落 / 换行）则丢弃，
+                // 避免输入框被插入 "\n\n" 这类无意义"空内容"。
+                const text = event.dataTransfer.getData("text/plain") ?? "";
+                if (!text.trim()) event.preventDefault();
+                return;
+              }
+              event.preventDefault();
+              appendAttachmentFiles(files);
+            }}
+ onPaste={event => {
               // 支持直接粘贴图片（截图 / 复制图片）：提取剪贴板中的图片文件成为附件。
               // 图片入附件区的同时，若剪贴板还携带非空纯文本（如网页复制截图+文字），不拦截文本照常插入。
               const clipboard = event.clipboardData;
