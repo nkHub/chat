@@ -126,6 +126,33 @@ const AKM_EDIT_IMAGE_TOOL: AgentTool = {
   },
 };
 
+// 读图工具（对应后端内置 akm_read_image，agent_read_image_enabled 开启后注册）。
+// 给不支持视觉的模型补充识图能力：调用配置的视觉模型（agent_vision_model）描述一张图片，
+// 返回文字描述。图片来源二选一：image_path 读服务器本地文件；或 image_base64 直接传
+// 对话中图片的 data URL（data:image/...;base64, 前缀兼容），云端无本地文件的场景最常用。
+const AKM_READ_IMAGE_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_read_image",
+    description:
+      "调用配置的视觉模型描述一张图片，返回图片的文字描述。图片来源二选一：image_path 传服务器本地图片文件绝对路径；或 image_base64 传图片 base64 数据（可带 data:image/...;base64, 前缀，可直接使用对话中图片的 data URL）。视觉模型取 agent_config.agent_vision_model（默认 gpt-5.6-luna，与图片生成的 image_supported_models 相互独立）；模型未支持视觉时调用会失败",
+    parameters: {
+      type: "object",
+      properties: {
+        image_path: { type: "string", description: "本地图片文件的绝对路径，与 image_base64 二选一" },
+        image_base64: {
+          type: "string",
+          description: "图片 base64 数据（可带 data:image/...;base64, 前缀），与 image_path 二选一，优先级更高",
+        },
+        prompt: { type: "string", description: "对图片的描述要求或提问，留空默认请模型描述图片内容" },
+        model: { type: "string", description: "视觉模型，默认取 agent_vision_model（默认 gpt-5.6-luna）" },
+      },
+      // 与后端一致：图片由 image_path / image_base64 二选一提供，prompt/model 均可选
+      required: [],
+    },
+  },
+};
+
 // 知识库检索工具（对应后端内置 akm_search_kb）。
 // 通过本机 markdown-kb 插件（POST /api/markdown-kb/query）检索已索引的 Markdown 知识库，
 // 返回命中片段（标题/文件名/相关度分数/正文摘要）。只读，作为基础工具始终声明；
@@ -974,6 +1001,9 @@ export function resolveDeclaredTools(tools: string[]): AgentTool[] {
     AKM_LIST_SESSIONS_TOOL,
     AKM_LOAD_SESSION_TOOL,
     AKM_LIST_LOGS_TOOL,
+    // 读图工具：后端条件注册（agent_read_image_enabled 开启，默认 true），
+    // 给不支持视觉的模型补充识图能力（对话中出现图片时使用），这里始终声明，避免白名单时丢失
+    AKM_READ_IMAGE_TOOL,
     // 交互澄清工具：后端默认注入，这里始终声明，保证显式传 tools 走白名单时不被丢弃
     AKM_ASK_USER_TOOL,
     // 定时任务工具：后端默认注入，这里始终声明，保证显式传 tools 走白名单时不被丢弃

@@ -27,6 +27,9 @@ const SLASH_COMMANDS: { id: string; name: string; aliases: string[]; description
 // start 为触发字符在输入文本中的下标，供选中后精确删除 `$token` 这段字。
 type SuggestState = { trigger: "$" | "/"; query: string; start: number } | null;
 
+// 输入区待发送附件：图片类生成 objectURL 用于缩略图预览，非图片仅携带文件本体。
+type Attachment = { file: File; previewUrl?: string };
+
 // 检测输入文本光标位置处是否需要弹出建议面板。规则（卡死，否则误弹）：
 // - 触发字符必须是 token 边界：行首，或前一个字符是空白；
 // - 触发字符到光标之间不能有空白（一旦继续输入了正文就不弹）；
@@ -94,7 +97,7 @@ function ChatPage({
   onCompact: () => Promise<string | null>;
 }) {
   const [input, setInput] = useState("");
-  const [attachments, setAttachments] = useState<File[]>([]);
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
   // —— `$` / `/` 触发式建议面板状态 ——
   // suggest 非空时弹出上拉列表；suggestIndex 为跨分组的扁平选中索引；
   // skillChip 为已选 Skill（唯一，再选新 Skill 替换）；sessionChips 为已引用会话（上限 3，满则顶掉最早）。
@@ -350,13 +353,31 @@ function ChatPage({
     removeSuggestToken();
   };
 
+  // 追加附件（文件选择器选择 / 剪贴板粘贴共用）：图片类生成预览 URL，按 name+size 去重。
+  const appendAttachmentFiles = (files: File[]) => {
+    setAttachments(prev => {
+      const incoming = files
+        .filter(file => !prev.some(item => item.file.name === file.name && item.file.size === file.size))
+        .map<Attachment>(file => ({ file, previewUrl: file.type.startsWith("image/") ? URL.createObjectURL(file) : undefined }));
+      return incoming.length > 0 ? [...prev, ...incoming] : prev;
+    });
+  };
+
+  // 清空附件并释放所有图片预览 URL，避免 objectURL 泄漏。
+  const clearAttachments = () => {
+    setAttachments(prev => {
+      prev.forEach(item => { if (item.previewUrl) URL.revokeObjectURL(item.previewUrl); });
+      return [];
+    });
+  };
+
   const send = () => {
     // 空内容拦截；回复进行中时点击发送视为"中途引导"（POST 由 App 层挂起，等自然停顿点插入），
     // 不再整条拦截，避免打断用户输入节奏。
     if (!input.trim() && !attachments.length) return;
     onSend(
-      input.trim() || attachments.map(file => file.name).join(", "),
-      attachments,
+      input.trim() || attachments.map(item => item.file.name).join(", "),
+      attachments.map(item => item.file),
       tools,
       skillChip ? { id: skillChip.id, name: skillChip.name } : undefined,
       sessionChips.length > 0 ? sessionChips.map(ref => ({ id: ref.id, title: ref.title })) : undefined,
@@ -368,7 +389,7 @@ function ChatPage({
     setSuggest(null);
     setSuggestIndex(0);
     setInput("");
-    setAttachments([]);
+    clearAttachments();
     if (textareaRef.current) textareaRef.current.style.height = "44px";
   };
 
@@ -445,9 +466,10 @@ function ChatPage({
                     <div className="min-w-0 rounded-xl border border-dashed border-primary/40 bg-primary/5 px-4 py-3 shadow-sm [overflow-wrap:anywhere]">
                       <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-primary">
                         <Lock size={12} className="shrink-0" />
-                        <span>已压缩较早的对话</span>
+                        <span>压缩过渡：此卡之上的较早对话已收纳为摘要</span>
                       </div>
                       <div className="text-sm text-muted-foreground [overflow-wrap:anywhere]">{message.content}</div>
+                      <div className="mt-2 text-[11px] leading-relaxed text-primary/60">此卡上方的完整对话记录仍保留在本地（不会删除），但发往模型时已折叠为上述摘要；从下方消息起为最近保留的原文与会话继续。</div>
                     </div>
                   ) : message.content ? (
                     <div className="min-w-0 rounded-xl border bg-card px-4 py-3 shadow-sm [overflow-wrap:anywhere]">
@@ -510,7 +532,7 @@ function ChatPage({
               ))}
             </div>
           ) : null}
-          {attachments.length > 0 && <div className="flex flex-wrap gap-1.5 px-4 pb-1 pt-3">{attachments.map((file, index) => <div key={`${file.name}-${index}`} className="flex max-w-[180px] items-center gap-1.5 rounded-lg border border-border bg-muted px-2.5 py-1 text-xs text-foreground/70"><Paperclip size={11} className="shrink-0 text-muted-foreground" /><span className="truncate">{file.name}</span><button type="button" aria-label={`移除${file.name}`} onClick={() => setAttachments(prev => prev.filter((_, itemIndex) => itemIndex !== index))} className="ml-0.5 shrink-0 text-muted-foreground hover:text-foreground"><X size={12} /></button></div>)}</div>}
+          {attachments.length > 0 && <div className="flex flex-wrap gap-1.5 px-4 pb-1 pt-3">{attachments.map((item, index) => <div key={`${item.file.name}-${index}`} className="flex max-w-[180px] items-center gap-1.5 rounded-lg border border-border bg-muted px-2 py-1 text-xs text-foreground/70">{item.previewUrl ? <button type="button" aria-label={`预览${item.file.name}`} onClick={() => openPreview(item.previewUrl!)} className="shrink-0 overflow-hidden rounded-md"><img src={item.previewUrl} alt={item.file.name} className="h-9 w-9 object-cover" /></button> : <Paperclip size={11} className="shrink-0 text-muted-foreground" />}<span className="truncate">{item.file.name}</span><button type="button" aria-label={`移除${item.file.name}`} onClick={() => { if (item.previewUrl) URL.revokeObjectURL(item.previewUrl); setAttachments(prev => prev.filter((_, itemIndex) => itemIndex !== index)); }} className="ml-0.5 shrink-0 text-muted-foreground hover:text-foreground"><X size={12} /></button></div>)}</div>}
           {/* 挂起的中途引导提示：回复进行中发送的内容被暂时挂起，待当前轮自然停顿时由后端接管插入 */}
           {pendingGuide ? (
             <div className="flex items-center justify-between gap-2 border-t border-border/60 px-4 py-1.5 text-xs text-muted-foreground">
@@ -525,6 +547,18 @@ function ChatPage({
             // 回复进行中也可继续输入：输入的内容会作为"中途引导"被挂起（见 pendingGuide），
             // 待当前轮 LLM 输出完整收尾时自动插入，而不是强制等整轮结束。
             placeholder={isReplyPending ? "回复生成中，可输入引导，将在自然停顿时插入…" : "发送消息… (Shift+Enter 换行)"}
+onPaste={event => {
+              // 支持直接粘贴图片（截图 / 复制图片）：提取剪贴板中的图片文件成为附件。
+              // 图片入附件区的同时，若剪贴板还携带非空纯文本（如网页复制截图+文字），不拦截文本照常插入。
+              const clipboard = event.clipboardData;
+              const imageFiles = Array.from(clipboard.items)
+                .filter(item => item.type.startsWith("image/"))
+                .map(item => item.getAsFile())
+                .filter((file): file is File => file !== null);
+              if (imageFiles.length === 0) return;
+              if (!clipboard.getData("text/plain").trim()) event.preventDefault();
+              appendAttachmentFiles(imageFiles);
+            }}
             onChange={event => {
               const value = event.target.value;
               setInput(value);
@@ -579,7 +613,7 @@ function ChatPage({
           />
           <div className="flex items-center justify-between px-3 pb-3 pt-1">
             <div className="flex min-w-0 items-center gap-0.5">
-              <input ref={fileInputRef} type="file" multiple accept="image/*,.txt" className="hidden" onChange={event => { setAttachments(prev => [...prev, ...Array.from(event.target.files ?? [])]); event.target.value = ""; }} />
+              <input ref={fileInputRef} type="file" multiple accept="image/*,.txt" className="hidden" onChange={event => { appendAttachmentFiles(Array.from(event.target.files ?? [])); event.target.value = ""; }} />
               <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="sm" className="h-7 gap-1.5 text-xs text-muted-foreground hover:text-foreground" onClick={() => fileInputRef.current?.click()} disabled={isReplyPending}><Paperclip size={13} />附件</Button></TooltipTrigger><TooltipContent>上传文件</TooltipContent></Tooltip>
               <Separator orientation="vertical" className="mx-1 h-4" />
               {[{ id: "search", icon: Search, label: "联网搜索" }, { id: "image", icon: ImageIcon, label: "图像生成" }].map(({ id, icon: Icon, label }) => <Tooltip key={id}><TooltipTrigger asChild><Button variant={tools.includes(id) ? "secondary" : "ghost"} size="sm" className={cn("h-7 gap-1.5 text-xs", tools.includes(id) ? "text-primary" : "text-muted-foreground hover:text-foreground")} onClick={() => onToolsChange(tools.includes(id) ? tools.filter(item => item !== id) : [...tools, id])} disabled={isReplyPending}><Icon size={13} /><span className="hidden lg:inline">{label}</span></Button></TooltipTrigger><TooltipContent>{label}</TooltipContent></Tooltip>)}

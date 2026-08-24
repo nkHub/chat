@@ -17,6 +17,20 @@ import { applyTheme, ThemeContext } from "./theme";
 import type { AssistantDef, ChatModel, Message, MessageSegment, Session, StoredChatState, ThemeMode, ThemePreset } from "./types";
 import { WorkflowPage } from "./workflow";
 
+// 组装"发送给模型的视角历史"：发生过上下文压缩的会话，用所有摘要消息 + 最近
+// COMPACT_KEEP_RECENT 条原文作为视角（更早的原文只出现在摘要里），未压缩则原样返回。
+// 注意这里只裁剪"发往模型"的历史；allMessages（界面渲染与本地 IndexedDB）始终保留完整
+// 原文，因此压缩后刷新仍能看到全部对话记录，不会被删。
+function buildRequestHistory(list: Message[]): Message[] {
+  const summaries: Message[] = [];
+  const original = list.filter(message => {
+    if (message.compactSummary) { summaries.push(message); return false; }
+    return true;
+  });
+  if (summaries.length === 0) return list;
+  return [...summaries, ...original.slice(-COMPACT_KEEP_RECENT)];
+}
+
 export default function App() {
   // 已保存的聊天状态：IndexedDB 读取是异步的，故初始为 null，
   // 挂载后经 loadChatState 恢复；stateLoaded 标记恢复完成，
@@ -345,6 +359,10 @@ export default function App() {
       const imageHint = tools.includes("image")
         ? "\n用户已开启图像生成/编辑：生成请调用 akm_generate_image；编辑可用 akm_edit_image（image_path 本地路径，或 image_base64 直接传对话中的 data URL）。生成/编辑完成后请把返回的图片 URL 以 Markdown 图片语法 ![图片](url) 写进回复正文，方便用户直接查看。"
         : "";
+      // 对话携带图片时给出识图提示：模型（尤其不可视图的模型）应把图片转成文字描述后再作答。
+      const readImageHint = files.some(file => file.type.startsWith("image/"))
+        ? "\n对话中存在用户上传或粘贴的图片。若你的模型无法直接查看图片（不支持视觉输入），请调用 akm_read_image 读取图片，把其内容转为文字描述后再回答；可把对话中的图片数据以 image_base64 参数传入。"
+        : "";
       // 按 UI 工具开关显式声明工具（白名单）：开启联网搜索/图像生成时只声明对应工具；
       // 全关时不传 tools，后端默认不会注入联网搜索/图片生成/编辑/文件写与 shell 工具，
       // 模型拿不到这些工具定义，不会自主联网、生成图片或读写文件。
@@ -354,7 +372,7 @@ export default function App() {
         model: modelKey,
         // 续跑时把后端返回的工作消息作为基底，再追加当前请求的会话消息。
         messages: baseMessages ? [...baseMessages, ...injected, ...toAgentMessages(requestHistory)] : [...injected, ...toAgentMessages(requestHistory)],
-        instructions: (sessions.find(session => session.id === sessionId)?.instructions ?? AGENT_INSTRUCTIONS) + searchHint + imageHint,
+        instructions: (sessions.find(session => session.id === sessionId)?.instructions ?? AGENT_INSTRUCTIONS) + searchHint + imageHint + readImageHint,
         tools: declaredTools.length ? declaredTools : undefined,
         files,
         signal: controller.signal,
@@ -560,7 +578,7 @@ export default function App() {
       ...(skillRef ? { skillRef } : {}),
       ...(sessionRefs && sessionRefs.length > 0 ? { sessionRefs } : {}),
     };
-    const requestHistory = [...existing, message];
+    const requestHistory = [...buildRequestHistory(existing), message];
     setAllMessages(prev => ({ ...prev, [sessionId]: [...(prev[sessionId] ?? []), message] }));
     setSessions(prev => {
       if (!prev.some(session => session.id === sessionId)) {
@@ -585,7 +603,8 @@ export default function App() {
     const sessionId = activeSession;
     if (!sessionId) return "没有选中的会话";
     const list = allMessages[sessionId] ?? [];
-    const messages = toAgentMessages(list);
+    // 压缩输入用"视角历史"（摘要 + 最近若干条原文），避免再把已归纳的早期原文重复喂给模型。
+    const messages = toAgentMessages(buildRequestHistory(list));
     if (messages.length === 0) return "会话暂无消息，无需压缩";
     const modelKey = selectedModel?.key;
     if (!modelKey) return "尚未选择模型";
@@ -602,8 +621,15 @@ export default function App() {
         status: "success",
         compactSummary: true,
       };
-      const tail = list.slice(-COMPACT_KEEP_RECENT);
-      setAllMessages(prev => ({ ...prev, [sessionId]: [summaryMessage, ...tail] }));
+      // 不替换、不删除旧消息：界面与本地记录保留完整原文。把摘要卡插在"最近保留的
+      // 原文"之前（旧内容 → 摘要卡 → 最近原文），让压缩过渡在界面上可见；
+      // 发往模型的历史由 buildRequestHistory 统一裁剪（摘要 + 最近 COMPACT_KEEP_RECENT 条）。
+      setAllMessages(prev => {
+        const current = prev[sessionId] ?? [];
+        const recent = current.slice(-COMPACT_KEEP_RECENT);
+        const before = current.slice(0, Math.max(0, current.length - recent.length));
+        return { ...prev, [sessionId]: [...before, summaryMessage, ...recent] };
+      });
       return null;
     } catch (error) {
       return error instanceof Error ? error.message : "压缩上下文失败";
@@ -655,7 +681,11 @@ export default function App() {
     if (userIndex < 0) return;
 
     const userMessage = { ...snapshot[userIndex], status: "sending" as const };
-    const requestHistory = [...snapshot.slice(0, userIndex + 1).slice(0, -1), userMessage];
+    // 重试历史同样走"视角历史"（摘要 + 最近若干条原文，见 buildRequestHistory），
+    // 再在视角里定位被重试的用户消息：它之前的内容作为上下文，本身作为本轮待发消息。
+    const view = buildRequestHistory(snapshot);
+    const userInViewIndex = view.findIndex(message => message.id === userMessage.id);
+    const requestHistory = [...view.slice(0, userInViewIndex < 0 ? view.length : userInViewIndex), userMessage];
     const assistantMessageId = target.role === "assistant" ? target.id : `${sessionId}-assistant-${Date.now()}`;
     setAllMessages(prev => ({
       ...prev,
@@ -705,7 +735,7 @@ export default function App() {
     if (activePage === "workflow") return <WorkflowPage sidebarOpen={sidebarOpen} onToggle={() => setSidebarOpen(value => !value)} models={models} />;
     if (activePage === "assistant") return <AssistantPage sidebarOpen={sidebarOpen} onToggle={() => setSidebarOpen(value => !value)} assistants={assistants} onAdd={(name, prompt) => setAssistants(prev => [{ id: `custom-${Date.now()}`, name, description: prompt, prompt, icon: Bot, color: "bg-primary/10 text-primary" }, ...prev])} onEdit={(id, name, prompt) => setAssistants(prev => prev.map(assistant => assistant.id === id ? { ...assistant, name, ...(prompt ? { prompt, description: prompt } : {}) } : assistant))} onStart={assistantId => { const assistant = assistants.find(candidate => candidate.id === assistantId); const assistantName = assistant?.name ?? "助手"; const sessionId = `${assistantId}-${Date.now()}`; const message: Message = { id: `${assistantId}-message`, role: "user", content: `你好，请以「${assistantName}」的身份来帮我。`, time: nowTime(), status: "success" }; setSessions(prev => [{ id: sessionId, title: assistantName, time: nowTime(), ...(assistant?.prompt ? { instructions: assistant.prompt } : {}) }, ...prev]); setAllMessages(prev => ({ ...prev, [sessionId]: [message] })); setActiveSession(sessionId); setActivePage("chat"); }} onDelete={assistantId => setAssistants(prev => prev.filter(assistant => assistant.id !== assistantId))} />;
     return <ChatPage session={activeSessionData} sessions={sessions} messages={messages} model={selectedModel} models={models} modelsLoading={modelsLoading} modelsError={modelsError} sidebarOpen={sidebarOpen} onToggleSidebar={() => setSidebarOpen(value => !value)} onModelChange={model => { setSelectedModel(model); if (activeSession) setSessions(prev => prev.map(session => session.id === activeSession ? { ...session, modelKey: model.key } : session)); }} onReloadModels={() => { void loadModels(); }}     onSend={(contentValue, attachments, tools, skillRef, sessionRefs) => sendMessage(contentValue, attachments, tools, skillRef, sessionRefs)} onNewSession={newSession} onRetry={retryMessage} onStop={stopReply} onAnswer={answerQuestion} onCompact={handleCompact} tools={activeSessionData?.tools ?? []} onToolsChange={tools => { if (!activeSession) return; setSessions(prev => prev.map(session => session.id === activeSession ? { ...session, tools } : session)); }} pendingGuide={pendingGuide} onCancelGuide={() => { pendingGuideRef.current = null; setPendingGuide(""); }} />;
-  }, [activePage, activeSessionData, allMessages, messages, models, modelsLoading, modelsError, selectedModel, sidebarOpen, assistants, sessions]);
+  }, [activePage, activeSessionData, allMessages, messages, models, modelsLoading, modelsError, selectedModel, sidebarOpen, assistants, sessions, pendingGuide]);
 
   return (
     <PreviewContext.Provider value={{ openPreview: setPreviewUrl }}>
