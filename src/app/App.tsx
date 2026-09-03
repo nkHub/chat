@@ -9,7 +9,7 @@ import { AssistantPage } from "./assistant";
 import { AutomationPage } from "./automation";
 import { ChatPage } from "./chat";
 import { AGENT_INSTRUCTIONS, AUTO_TITLE_ENABLED, COMPACT_KEEP_RECENT, DEFAULT_ASSISTANTS, THEMES, THEME_KEY, THEME_MODE_KEY } from "./constants";
-import { clearModalResidue, extractTextContent, messageText, normalizeStoredState, nowTime, sessionRefsToContextMessages, toAgentMessages, toChatModel } from "./helpers";
+import { clearModalResidue, extractTextContent, fenceCloser, messageText, normalizeStoredState, nowTime, sessionRefsToContextMessages, splitFenceDeltas, toAgentMessages, toChatModel } from "./helpers";
 import { BUILTIN_SKILLS } from "./skills";
 import { Lightbox, PreviewContext } from "./preview";
 import { Sidebar } from "./sidebar";
@@ -299,13 +299,24 @@ export default function App() {
     let segMode: "text" | "thinking" | null = null;
     let segTimer: number | undefined;
 
-    // 把当前正文/思考缓冲并入段列表：若最后一个同类型段存在则追加，否则新建一段。
-    const pushBuffers = () => {
+    // 把当前正文增量并入段列表（append，语义与逐帧 flush 累加一致）：最后一个 text 段
+    // 存在则追加，否则新建正文段。注意流式正文（含未闭合代码围栏原文）逐帧写回后由
+    // 渲染层按围栏状态切分展示：围栏前正文走 markdown、开放围栏代码渐进展示，见 chat.tsx。
+    // finalize 为 true（真正收尾）时若最后一个正文段仍有未闭合围栏，前端自动补一个同型的
+    // 闭合围栏，把代码块收为完整块——避免正文残留半截、也避免渐进块"永在生成"。
+    const pushBuffers = (finalize: boolean) => {
       if (curText) {
         const last = segments[segments.length - 1];
         if (last?.type === "text") last.content += curText;
         else segments.push({ type: "text", content: curText });
         curText = "";
+      }
+      if (finalize) {
+        const last = segments[segments.length - 1];
+        if (last?.type === "text") {
+          const view = splitFenceDeltas(last.content);
+          if (view.openFence) last.content += `\n${fenceCloser(view.openFence.fenceLine)}`;
+        }
       }
       if (curThinking) {
         const last = segments[segments.length - 1];
@@ -316,9 +327,10 @@ export default function App() {
     };
 
     // 将缓冲写回消息（40ms 节流），可选更新 streamStatus，避免逐 token 全量渲染。
+    // 渲染帧走 pushBuffers(false)：正文（含未闭合围栏原文）随帧累进，渲染层渐进展示。
     const writeSegments = (streamStatus?: string) => {
       segTimer = undefined;
-      pushBuffers();
+      pushBuffers(false);
       setAllMessages(prev => ({
         ...prev,
         [sessionId]: (prev[sessionId] ?? []).map(message => message.id === assistantMessageId
@@ -328,13 +340,14 @@ export default function App() {
     };
 
     // 立即冲刷并结束当前正文/思考流（工具边界/错误前调用，保证内容顺序）。
+    // 收尾走 pushBuffers(true)：未闭合围栏在此补全闭合围栏（见 pushBuffers）。
     const finalizeStream = () => {
       if (segTimer) {
         window.clearTimeout(segTimer);
         segTimer = undefined;
       }
       segMode = null;
-      pushBuffers();
+      pushBuffers(true);
     };
 
     try {

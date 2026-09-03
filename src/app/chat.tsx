@@ -1,4 +1,4 @@
-import { useContext, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { Bot, CircleStop, ImageIcon, Loader2, Lock, Paperclip, PanelLeftClose, PanelLeftOpen, Search, Send, X } from "lucide-react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
@@ -8,8 +8,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { cn } from "@/lib/utils";
 import { AskUserCard, CitationsBlock, ContextHint, FunctionCallBlock, MessageActions, StatusNotice } from "./blocks";
 import { ComposerSuggest, type SuggestGroup } from "./composer-suggest";
-import { formatDisplayTime, messageText } from "./helpers";
-import { MemoMarkdown, ThinkingBlock } from "./markdown";
+import { formatDisplayTime, messageText, splitSegmentForRender } from "./helpers";
+import { MemoMarkdown, StreamingCodeBlock, ThinkingBlock } from "./markdown";
 import { PreviewContext } from "./preview";
 import { EmptyChat, ModelSettingsPopover, ThemeSettingsPopover } from "./sidebar";
 import { BUILTIN_SKILLS, filterSkills, type Skill } from "./skills";
@@ -412,11 +412,26 @@ function ChatPage({
                 <div className="space-y-2.5">
                   {message.segments.map((segment, segmentIndex) => {
                     if (segment.type === "text") {
+                      // 拆出可能存在的"流式开放围栏"：renderable 为定稿正文，
+                      // openFence 为还在生成的代码块（闭合前灰化显示 + ▌光标）。
+                      const view = splitSegmentForRender(segment.content);
+                      // 正文没有可见字符（空 / 纯空白，例如整段只是流式挂起的未闭合代码块前缀，
+                      // 且 openFence 也被置空）时不渲染空白的气泡块，避免出现空框。
+                      if (!view.renderable.trim() && !view.openFence) return null;
                       return (
-                        <div key={`text-${segmentIndex}`} className="min-w-0 rounded-xl border bg-card px-4 py-3 shadow-sm [overflow-wrap:anywhere]">
-                          <MemoMarkdown content={segment.content} />
-                          {message.citations && segmentIndex === message.segments!.length - 1 && <CitationsBlock citations={message.citations} />}
-                        </div>
+                        <Fragment key={`text-${segmentIndex}`}>
+                          {view.renderable.trim() ? (
+                            <div className="min-w-0 rounded-xl border bg-card px-4 py-3 shadow-sm [overflow-wrap:anywhere]">
+                              <MemoMarkdown content={view.renderable} />
+                            </div>
+                          ) : null}
+                          {/* 仍在流式生成的代码块：渐进式展示（灰化 + 尾部 ▌ 光标闪烁），
+                              避免渲染层把未闭合围栏后的内容当正文、闭合后布局跳变 */}
+                          {view.openFence && message.status === "sending" ? (
+                            <StreamingCodeBlock fenceLine={view.openFence.fenceLine} code={view.openFence.code} />
+                          ) : null}
+                          {message.citations && segmentIndex === message.segments!.length - 1 ? <CitationsBlock citations={message.citations} /> : null}
+                        </Fragment>
                       );
                     }
                     if (segment.type === "thinking") {
@@ -471,7 +486,7 @@ function ChatPage({
                       <div className="text-sm text-muted-foreground [overflow-wrap:anywhere]">{message.content}</div>
                       <div className="mt-2 text-[11px] leading-relaxed text-primary/60">此卡上方的完整对话记录仍保留在本地（不会删除），但发往模型时已折叠为上述摘要；从下方消息起为最近保留的原文与会话继续。</div>
                     </div>
-                  ) : message.content ? (
+                  ) : message.content.trim() ? (
                     <div className="min-w-0 rounded-xl border bg-card px-4 py-3 shadow-sm [overflow-wrap:anywhere]">
                       <MemoMarkdown content={message.content} />
                       {message.citations && <CitationsBlock citations={message.citations} />}

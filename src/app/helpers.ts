@@ -183,6 +183,77 @@ function clearModalResidue() {
   document.documentElement.style.pointerEvents = "";
 }
 
+// 流式正文的代码围栏（fence）解析（无状态、纯函数）：
+// GFM 围栏代码块以行首 ``` / ~~~（≥3 个）开头。LLM 流式输出时经常先吐出未闭合的
+// fence 与半截代码。本文件把"累积的正文全量文本"按围栏状态解析为两部分：
+//   renderable —— 围栏前已定稿、可安全交给 react-markdown 渲染的文本（含完整代码块）；
+//   openFence  —— 仍处于开放（未闭合）态的围栏代码块信息：围栏行原文（决定语言与
+//                 反引号/波浪线类型长度，收尾自动补闭合围栏时必须与之同型）与迄今
+//                 已收的代码正文。渲染层据此显示"渐进式代码块"（灰化 + ▌光标）。
+// 注意：围栏开放期间其后的每一行都属于代码正文（在闭合围栏出现前无法区分"代码内行"
+// 与"围栏后正文"，后者要等闭合后才定稿）。解析按行扫描，只认行首（允许前导缩进）的
+// 成对开闭标记，忽略行内出现的反引号。
+
+type OpenFenceState = {
+  fenceLine: string;      // 开围栏行原文，如 "```ts"
+  code: string;           // 已收的代码正文（不含围栏行）
+};
+
+// splitFenceDeltas 对"当前正文流全量累积文本"做围栏状态解析，返回统一结构：
+// 调用方把 renderable 同步为正文段、把 openFence 交渲染层渐进展示。全量重扫 +
+// 前端维护增量文本，天然无状态，跨帧重入安全。
+function splitFenceDeltas(text: string): { renderable: string; openFence: OpenFenceState | null } {
+  if (!text) return { renderable: "", openFence: null };
+  const lines = text.split("\n");
+  const fencePattern = /^(`{3,}|~{3,})/;
+  let openIndex = -1;         // 当前仍开放围栏的起始行下标；-1 表示围栏全部闭合
+  let openFenceLine = "";
+  let fenceOpen = false;      // 扫描过程中当前是否处于某段开放围栏内
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!fencePattern.test(lines[index].trimStart())) continue;   // 仅行首 fence 标记参与开闭
+    if (!fenceOpen) {
+      fenceOpen = true;        // 遇到开围栏
+      openIndex = index;
+      openFenceLine = lines[index];
+    } else {
+      fenceOpen = false;       // 遇到闭合围栏
+      openIndex = -1;
+      openFenceLine = "";
+    }
+  }
+  // 围栏全部闭合：全文定稿，无开放块。
+  if (!fenceOpen || openIndex < 0) return { renderable: text, openFence: null };
+  // 围栏仍开放：围栏前为已定稿正文，其后所有行都暂属代码正文（闭合后才并入正文段）。
+  const renderable = lines.slice(0, openIndex).join("\n");
+  const codeLines = lines.slice(openIndex + 1);
+  const code = codeLines.join("\n").replace(/^\n+|\n+$/g, "");    // 掐掉前后多余空行，避免渲染出空行块
+  return { renderable, openFence: { fenceLine: openFenceLine, code } };
+}
+
+// 由开围栏行原文推导与之同型的闭合围栏（同字符、同长度）：
+// 开围栏 "```ts" → 闭合 "```"；开围栏 "~~~" → 闭合 "~~~"。用于流被截断/结束时
+// 前端自动补全闭合围栏，使最终落盘的正文是合法的完整代码块。
+function fenceCloser(fenceLine: string): string {
+  const match = /^(`{3,}|~{3,})/.exec(fenceLine.trimStart());
+  if (!match) return "```";
+  const run = match[1];
+  return run[0].repeat(run.length);
+}
+
+// 把单个正文段（可能含流式开放围栏）拆为"定稿正文"与"渐进代码块"两部分，供渲染：
+// 若正文没有可见内容（围栏未开或 open 围栏前无文字、代码也未开始），code 为空则不显示。
+// 注意开放围栏期间其后的行都视为代码（GFM 下要等闭合围栏才能区分正文与代码）。
+// 该函数只服务渲染，不改动累积语义。
+function splitSegmentForRender(text: string): { renderable: string; openFence: OpenFenceState | null } {
+  const view = splitFenceDeltas(text);
+  // 开放围栏代码块自身为空（模型刚吐出围栏行还没写代码）时不展示渐进块，
+  // 避免闪现一个空容器；renderable 为空则整段回退为正常 markdown（无块）。
+  if (view.openFence && view.openFence.code.trim() === "") view.openFence = null;
+  return view;
+}
+
+export type { OpenFenceState };
+
 function nodeToText(node: ReactNode): string {
   if (node == null || typeof node === "boolean") return "";
   if (typeof node === "string" || typeof node === "number") return String(node);
@@ -191,4 +262,4 @@ function nodeToText(node: ReactNode): string {
   return "";
 }
 
-export { normalizeStoredState, toChatModel, nowTime, formatDisplayTime, formatRelativeTime, extractTextContent, messageText, toAgentMessages, sessionRefsToContextMessages, clearModalResidue, nodeToText };
+export { normalizeStoredState, toChatModel, nowTime, formatDisplayTime, formatRelativeTime, extractTextContent, messageText, toAgentMessages, sessionRefsToContextMessages, clearModalResidue, splitFenceDeltas, fenceCloser, splitSegmentForRender, nodeToText };

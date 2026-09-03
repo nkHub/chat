@@ -25,3 +25,14 @@
   scrollbar-width: thin;
   scrollbar-color: rgb(148 163 184 / 0.4) transparent;
 }
+
+/* 流式渐进代码块尾部的生成光标：方块 ▌ 按 1s 循环呼吸闪烁，强化"仍在生成"的暗示。
+   用 opacity 而非 transform 做动画，避免触发布局重排。 */
+.streaming-caret {
+  animation: streaming-caret-blink 1s step-end infinite;
+}
+
+@keyframes streaming-caret-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}

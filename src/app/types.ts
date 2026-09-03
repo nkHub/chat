@@ -31,6 +31,8 @@ type FunctionCall = {
 
 // 助手消息内容按"发生顺序"组织的段序列：text=正文段、thinking=思考段、tool=工具调用段。
 // 各段按序叠加展示（正文→思考→工具调用→下一段正文…），避免多轮正文互相覆盖。
+// 注：流式进行中的 text 段 content 可能含有尚未闭合的代码围栏原文（正文全量累积），
+// 渲染层按围栏状态切分：围栏前正文走 markdown、开放围栏代码走渐进式展示（见 chat.tsx）。
 type MessageSegment =
   | { type: "text"; content: string }
   | { type: "thinking"; content: string }

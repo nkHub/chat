@@ -78,6 +78,27 @@ function CodeBlock({ code, language }: { code: string; language: string }) {
   );
 }
 
+// 流式生成中的"渐进式代码块"：正文段末尾的开放（未闭合）围栏代码块。
+// 围栏一吐出就渲染代码容器，尾部放闪烁的 ▌ 光标暗示仍在生成；代码随帧增长不跳动。
+// 配色与下方 CodeBlock 完全一致（border-zinc-800 / bg-zinc-950 / 文字 text-zinc-300），
+// 闭合后渐进块消失、完整代码并入正文走 CodeBlock，两者视觉无缝衔接，无"先灰后亮"跳变。
+// 容器加 mx-4 与正文气泡的 px-4 对齐：否则渐进态是消息列全宽、闭合后进气泡内缩 16px，
+// 代码块会"先宽后突然收窄"。代码块本身无气泡框，用水平外距补齐同等内缩。
+function StreamingCodeBlock({ fenceLine, code }: { fenceLine: string; code: string }) {
+  const language = /language-(\w+)/.exec(fenceLine)?.[1] ?? "";
+  return (
+    <div className="mx-4 my-3 overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950 text-xs font-mono">
+      <div className="flex items-center justify-between border-b border-zinc-800 bg-zinc-900 px-3 py-1.5">
+        <span className="text-xs uppercase tracking-wider text-zinc-500">{language || "code"}</span>
+        <span className="flex items-center gap-1 text-[11px] text-zinc-500">生成中…</span>
+      </div>
+      <pre className="overflow-x-auto p-3 leading-relaxed text-zinc-300">
+        <code>{code}<span className="streaming-caret text-zinc-200">▌</span></code>
+      </pre>
+    </div>
+  );
+}
+
 function renderMarkdown(text: string, components: Components = MARKDOWN_COMPONENTS) {
   return (
     <ReactMarkdown
@@ -159,4 +180,4 @@ function ThinkingBlock({ text, defaultOpen = false }: { text: string; defaultOpe
   );
 }
 
-export { MARKDOWN_COMPONENTS, CodeBlock, renderMarkdown, MemoMarkdown, THINKING_COMPONENTS, ThinkingBlock };
+export { MARKDOWN_COMPONENTS, CodeBlock, StreamingCodeBlock, renderMarkdown, MemoMarkdown, THINKING_COMPONENTS, ThinkingBlock };
