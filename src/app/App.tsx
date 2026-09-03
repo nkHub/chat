@@ -3,7 +3,7 @@ import { Bot } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { compactMessages, fetchModels, resolveDeclaredTools, runAgent, runAgentStream, type AgentMessage } from "@/lib/agent-api";
+import { compactMessages, fetchModels, runAgent, runAgentStream, type AgentMessage } from "@/lib/agent-api";
 import { loadChatState, saveChatState } from "@/lib/chat-store";
 import { AssistantPage } from "./assistant";
 import { AutomationPage } from "./automation";
@@ -376,17 +376,14 @@ export default function App() {
       const readImageHint = files.some(file => file.type.startsWith("image/"))
         ? "\n对话中存在用户上传或粘贴的图片。若你的模型无法直接查看图片（不支持视觉输入），请调用 akm_read_image 读取图片，把其内容转为文字描述后再回答；可把对话中的图片数据以 image_base64 参数传入。"
         : "";
-      // 按 UI 工具开关显式声明工具（白名单）：开启联网搜索/图像生成时只声明对应工具；
-      // 全关时不传 tools，后端默认不会注入联网搜索/图片生成/编辑/文件写与 shell 工具，
-      // 模型拿不到这些工具定义，不会自主联网、生成图片或读写文件。
-      const declaredTools = resolveDeclaredTools(tools);
-
       for await (const event of runAgentStream({
         model: modelKey,
         // 续跑时把后端返回的工作消息作为基底，再追加当前请求的会话消息。
         messages: baseMessages ? [...baseMessages, ...injected, ...toAgentMessages(requestHistory)] : [...injected, ...toAgentMessages(requestHistory)],
         instructions: (sessions.find(session => session.id === sessionId)?.instructions ?? AGENT_INSTRUCTIONS) + searchHint + imageHint + readImageHint,
-        tools: declaredTools.length ? declaredTools : undefined,
+        // 普通工具由服务端按当前注册状态与 config 开关注入；chat 只传两个
+        // 用户可见的可选能力开关，新增服务端工具不再需要同步更新前端 schema。
+        toolOptions: { search: tools.includes("search"), image: tools.includes("image") },
         files,
         signal: controller.signal,
       })) {

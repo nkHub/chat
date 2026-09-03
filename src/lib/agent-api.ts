@@ -1143,6 +1143,7 @@ function createAgentRequestBody(options: {
   messages: AgentMessage[];
   instructions: string;
   tools?: AgentTool[];
+  toolOptions?: { search: boolean; image: boolean };
 }, stream: boolean) {
   return JSON.stringify({
     model: options.model,
@@ -1151,6 +1152,7 @@ function createAgentRequestBody(options: {
     // 仅当显式声明了工具时才携带 tools 字段（白名单注入）。
     // 未开启任何工具时不传 tools：后端默认不注入联网搜索/图片生成/编辑工具。
     ...(options.tools?.length ? { tools: options.tools } : {}),
+    ...(options.toolOptions ? { tool_options: options.toolOptions } : {}),
     api_path: "chat/completions",
     max_turns: 50,
     stream,
@@ -1164,6 +1166,7 @@ function createAgentFormData(options: {
   messages: AgentMessage[];
   instructions: string;
   tools?: AgentTool[];
+  toolOptions?: { search: boolean; image: boolean };
   files: File[];
 }, stream: boolean) {
   const form = new FormData();
@@ -1173,6 +1176,7 @@ function createAgentFormData(options: {
   // multipart 场景同样支持 tools：仅当显式声明了工具时才携带，
   // 与纯 JSON 一样按白名单注入声明中列出的工具。
   if (options.tools?.length) form.append("tools", JSON.stringify(options.tools));
+  if (options.toolOptions) form.append("tool_options", JSON.stringify(options.toolOptions));
   form.append("api_path", "chat/completions");
   form.append("max_turns", "50");
   form.append("stream", String(stream));
@@ -1191,6 +1195,7 @@ export async function runAgent(options: {
   messages: AgentMessage[];
   instructions: string;
   tools?: AgentTool[];
+  toolOptions?: { search: boolean; image: boolean };
 }): Promise<AgentResponse> {
   const payload = await requestJson<AgentResponse>("/v1/agent", {
     method: "POST",
@@ -1251,6 +1256,7 @@ export async function* runAgentStream(options: {
   messages: AgentMessage[];
   instructions: string;
   tools?: AgentTool[];
+  toolOptions?: { search: boolean; image: boolean };
   files?: File[];
   // 传入中断信号后，点击"停止"会 abort 该请求：前端停止读取，
   // 后端检测到连接断开后停止生成，避免中断后继续烧 token。
