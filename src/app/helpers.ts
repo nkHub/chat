@@ -127,7 +127,7 @@ function toAgentMessages(messages: Message[]): AgentMessage[] {
 // 把引用的会话历史整理成一段整体注入的"引用资料"消息（role:user）：
 // - 开头显式声明：下列内容来自其它会话，是背景参考资料，不属于当前对话的历史轮次，
 //   避免模型把引用内容与当前对话原始轮次混淆；
-// - 每个会话块用分隔行包住，并附带 session_id，提示可用 akm_load_session 按 id 加载更完整内容；
+// - 每个会话块用分隔行包住，并附带 session_id，提示可用 ui_load_session 按 id 取更完整内容；
 // - 限制每会话最近条数、单块字符与总字符量，避免撑爆上下文。
 function sessionRefsToContextMessages(refs: { id: string; title: string }[], all: Record<string, Message[]>, maxMessages = 12, maxChars = 4000, totalChars = 8000): AgentMessage[] {
   const blocks: string[] = [];
@@ -151,7 +151,7 @@ function sessionRefsToContextMessages(refs: { id: string; title: string }[], all
     const block = [
       `[引用会话「${ref.title}」（session_id: ${ref.id}）]`,
       body,
-      `若需查看该会话更完整上下文，可调用 akm_load_session 工具，传 session_id=${ref.id}。`,
+      `若需查看该会话更完整上下文，可调用 ui_load_session 工具，传 name=${ref.id}（默认从最近往前翻一页）。`,
     ].join("\n");
     // 总预算不足则裁剪掉更靠后的引用块。
     if (block.length > budget) break;

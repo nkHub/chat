@@ -39,6 +39,26 @@ npm run preview
   首次读取时自动迁移旧 `localStorage` 数据，刷新不丢失
 - 时间智能显示（刚刚 / 具体时间）
 
+### 客户端工具（会话历史由浏览器自己提供）
+会话历史完整存在浏览器 IndexedDB 里，服务端读不到，因此界面用 AKM 的**客户端工具执行协议**
+自己声明并执行两个工具（`src/lib/client-tools.ts`，随请求的 `client_tools` 字段下发）：
+
+| 工具 | 作用 |
+| --- | --- |
+| `ui_list_sessions` | 列出本地会话（会话名 / 标题 / 创建与更新时间 / 消息数 / 模型），不含正文 |
+| `ui_load_session` | 三合一：传 `query` 搜索全部会话；传 `name` 读该会话**一页**消息；都不传则列出会话元数据 |
+
+**有界读取**：单个会话可能有上千条消息，所以返回一律有界——分页 `offset 0` 是最新一页
+（从最近往前翻），单次最多 50 条、默认 20 条（`limit` 在实现层夹紧），`total` / `has_more`
+/ `range` 供翻页；搜索只回片段与 `offset_from_latest`，命中总数单独计数、只回传 20 条，
+且**优先保留最近命中**。系统提示词要求模型不要全量读取聊天记录：先列会话、再搜索定位、
+只读相关一两页。纯逻辑在 `src/lib/session-history.ts`，用 `npm run check:history` 验证
+（esbuild + node，26 项断言：翻页不重不漏、`offset` 越界收敛到最早一页、`limit` 夹紧等）。
+
+服务端把模型调用交回浏览器（`client_tool_call` 事件），前端本地执行后把结果作为
+`role: "tool"` 消息追加入 `messages` 续跑同一轮 Agent（见 `App.tsx` 的 `client_tool_call` 分支）。
+Agent 服务端已彻底移除对话历史落盘；旧版本遗留的 `~/.akm/agent_sessions/` 会在更新包缓存清理开启时随维护流程永久删除。协议细节见 AKM 仓库 `akm/agent_runtime/agent.md` 的「客户端工具执行」。
+
 ### 模型
 - 模型列表按名称字母排序，剔除 `reranker` / `embedding` / `review` 名称的模型
 - 每个会话可单独记忆所选模型，切换会话时自动恢复

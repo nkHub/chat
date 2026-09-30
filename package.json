@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "check:history": "mkdir -p /tmp/shcheck && esbuild src/lib/session-history.ts --format=esm --outfile=/tmp/shcheck/session-history.mjs --log-level=error && node scripts/check-session-history.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

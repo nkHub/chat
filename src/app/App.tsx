@@ -5,6 +5,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { compactMessages, fetchModels, runAgent, runAgentStream, type AgentMessage } from "@/lib/agent-api";
 import { loadChatState, saveChatState } from "@/lib/chat-store";
+import { CLIENT_TOOLS, executeClientTool } from "@/lib/client-tools";
 import { AssistantPage } from "./assistant";
 import { AutomationPage } from "./automation";
 import { ChatPage } from "./chat";
@@ -252,7 +253,7 @@ export default function App() {
     if (messageCount >= 10 && messageCount % 10 === 0) void generateSessionTitle(sessionId);
   };
 
-  const requestAgent = async (sessionId: string, userMessageId: string, assistantMessageId: string, requestHistory: Message[], files: File[] = [], tools: string[] = [], baseMessages?: AgentMessage[], injected: AgentMessage[] = []) => {
+  const requestAgent = async (sessionId: string, userMessageId: string, assistantMessageId: string, requestHistory: Message[], files: File[] = [], tools: string[] = [], baseMessages?: AgentMessage[], injected: AgentMessage[] = [], resumeSegments?: MessageSegment[]) => {
     // injected 为引用会话（$ + 会话名）整理出的上下文消息：拼在历史之前，
     // 让模型能看到被引用会话的对话记录。仅在首次发送时由 sendMessage 传入。
     // baseMessages 为 akm_ask_user 续跑时后端返回的完整工作消息：回答会追加在其后，
@@ -270,18 +271,31 @@ export default function App() {
       return;
     }
 
-    const pendingAssistant: Message = {
-      id: assistantMessageId,
-      role: "assistant",
-      content: "",
-      time: nowTime(),
-      status: "sending",
-      streamStatus: "正在连接 Agent…",
-    };
-    setAllMessages(prev => ({
-      ...prev,
-      [sessionId]: [...(prev[sessionId] ?? []), pendingAssistant],
-    }));
+    // resumeSegments 有值 = 客户端工具续跑：结果要接回同一条助手消息。
+    // 不能再插一条同 id 的气泡——两条同 id 会让 React 串 key，流式文本对错位
+    // （实测 grok 被改写成 arok），同一轮回复也会被拆成上下两张卡片。
+    const resumeExisting = resumeSegments !== undefined;
+    if (!resumeExisting) {
+      const pendingAssistant: Message = {
+        id: assistantMessageId,
+        role: "assistant",
+        content: "",
+        time: nowTime(),
+        status: "sending",
+        streamStatus: "正在连接 Agent…",
+      };
+      setAllMessages(prev => ({
+        ...prev,
+        [sessionId]: [...(prev[sessionId] ?? []), pendingAssistant],
+      }));
+    } else {
+      setAllMessages(prev => ({
+        ...prev,
+        [sessionId]: (prev[sessionId] ?? []).map(message => message.id === assistantMessageId
+          ? { ...message, status: "sending" as const, streamStatus: "正在连接 Agent…" }
+          : message),
+      }));
+    }
 
     const updateAssistant = (changes: Partial<Message>) => {
       setAllMessages(prev => ({
@@ -293,7 +307,11 @@ export default function App() {
     // —— 段序列（segments）流式累积 ——
     // 每条消息的内容按发生顺序组织为若干段（正文/思考/工具调用段），
     // 这样工具轮正文与最终轮正文是各自独立的段，不会互相覆盖，而是顺序叠加展示。
-    let segments: MessageSegment[] = [];
+    // 续跑时带上本轮已经落地的段（含刚执行完的客户端工具），新正文接在后面。
+    // 拷贝一层，避免和上一次请求闭包里的段对象互相改。
+    let segments: MessageSegment[] = resumeExisting ? resumeSegments.map(segment => ({ ...segment })) : [];
+    // 本轮新产生的正文/思考从这里开始；final 只覆盖本轮的段，不回写工具之前的正文。
+    const segmentBaseline = segments.length;
     let curText = "";
     let curThinking = "";
     let segMode: "text" | "thinking" | null = null;
@@ -354,6 +372,8 @@ export default function App() {
       let completed = false;
       // AI 询问用户（akm_ask_user）时暂存的澄清内容；有值说明本轮已转为等待回答。
       let askPending: { question: string; options?: string[]; multiple?: boolean; messages: AgentMessage[] } | null = null;
+      // 客户端工具（client_tool_call）待执行的调用；有值说明本轮流结束后要在浏览器执行该工具并续跑。
+      let clientToolPending: { toolCallId: string; name: string; arguments: Record<string, unknown>; messages: AgentMessage[] } | null = null;
       // 收到第一条回复事件后立即把用户消息标记为已发送成功，不再显示"发送中"。
       let userMarked = false;
 
@@ -383,6 +403,8 @@ export default function App() {
         instructions: (sessions.find(session => session.id === sessionId)?.instructions ?? AGENT_INSTRUCTIONS) + searchHint + imageHint + readImageHint,
         // 普通工具由服务端按当前注册状态与 config 开关注入；chat 只传两个
         // 用户可见的可选能力开关，新增服务端工具不再需要同步更新前端 schema。
+        // clientTools 是"数据在浏览器里"的工具（会话历史等）：服务端把调用交回前端执行。
+        clientTools: CLIENT_TOOLS,
         toolOptions: { search: tools.includes("search"), image: tools.includes("image") },
         files,
         signal: controller.signal,
@@ -445,6 +467,20 @@ export default function App() {
             multiple: Boolean(event.data.multiple),
             messages: event.data.messages ?? [],
           };
+        } else if (event.event === "client_tool_call") {
+          // 客户端工具：服务端把调用交回浏览器本地执行（会话历史等数据在 IndexedDB，
+          // 服务端拿不到）。本轮同样不走 final 收尾，待循环结束后本地执行工具，
+          // 把结果作为 tool 消息追加入工作消息续跑同一轮 Agent。
+          finalizeStream();
+          const toolName = event.data.name || "客户端工具";
+          segments.push({ type: "tool", name: toolName, params: event.data.arguments ?? {}, result: null, status: "running" });
+          updateAssistant({ segments: segments.slice(), streamStatus: `正在本地执行 ${toolName}…` });
+          clientToolPending = {
+            toolCallId: event.data.tool_call_id || "",
+            name: toolName,
+            arguments: event.data.arguments ?? {},
+            messages: event.data.messages ?? [],
+          };
         } else if (event.event === "turn_pause") {
           // 自然停顿点：当前轮 LLM 输出（正文/思考）已完整收尾。若用户在回复过程中
           // 输入了"中途引导"（pendingGuideRef 有值），在此中断当前轮，用后端返回的
@@ -483,17 +519,20 @@ export default function App() {
           if (!content.trim()) throw new Error("Agent 返回了空消息");
           const thinking = extractTextContent(finalMessage?.reasoning_content);
 
-          // 最终正文覆盖最后一个 text 段（该段即最终轮正文的流式累积）；
-          // 若最终轮未实时输出正文（无 text 段），则追加一段。
-          const textIndex = segments.map(segment => segment.type).lastIndexOf("text");
+          // 最终正文只覆盖「本轮」产生的最后一个 text 段（即本轮流式累积的正文）。
+          // 客户端工具续跑时，工具之前的正文属于上一轮，不能被这次的 final 回写——
+          // 否则上一段正文会被续跑的正文整段替换掉。
+          const textIndex = segments.map((segment, index) => index >= segmentBaseline && segment.type === "text" ? index : -1)
+            .reduce((last, index) => index >= 0 ? index : last, -1);
           if (textIndex >= 0) {
             (segments[textIndex] as { type: "text"; content: string }).content = content;
           } else {
             segments.push({ type: "text", content });
           }
-          // 最终思考同样覆盖最后一个 thinking 段，否则追加。
+          // 最终思考同样只覆盖本轮的最后一个 thinking 段，否则追加。
           if (thinking.trim()) {
-            const thinkingIndex = segments.map(segment => segment.type).lastIndexOf("thinking");
+            const thinkingIndex = segments.map((segment, index) => index >= segmentBaseline && segment.type === "thinking" ? index : -1)
+              .reduce((last, index) => index >= 0 ? index : last, -1);
             if (thinkingIndex >= 0) {
               (segments[thinkingIndex] as { type: "thinking"; content: string }).content = thinking;
             } else {
@@ -536,6 +575,40 @@ export default function App() {
             return { ...message, status: "asking" as const, streamStatus: undefined, askUser: askPending, segments: segments.slice() };
           }),
         }));
+      } else if (clientToolPending) {
+        // 客户端工具：在浏览器本地执行（会话历史等数据只存在于 IndexedDB），
+        // 把结果作为 role: "tool" 消息追加进服务端返回的工作上下文后续跑同一轮 Agent。
+        const pending = clientToolPending;
+        const result = await executeClientTool(pending.name, pending.arguments);
+        const hasError = result.includes('"error"');
+        for (let index = segments.length - 1; index >= 0; index -= 1) {
+          const segment = segments[index];
+          if (segment.type === "tool" && segment.name === pending.name) {
+            segment.status = hasError ? "error" : "success";
+            segment.result = result;
+            break;
+          }
+        }
+        setAllMessages(prev => ({
+          ...prev,
+          [sessionId]: (prev[sessionId] ?? []).map(message => message.id === assistantMessageId
+            ? { ...message, segments: segments.slice(), streamStatus: `正在继续（已执行 ${pending.name}）…` }
+            : message),
+        }));
+        // 工具结果按 Chat 协议紧跟 assistant 的 tool_calls 之后，因此走 injected
+        // （不落会话历史）注入；requestHistory 传空数组，避免把本轮之前的用户/助手
+        // 消息再拼一遍导致工作上下文重复。
+        void requestAgent(
+          sessionId,
+          userMessageId,
+          assistantMessageId,
+          [],
+          files,
+          tools,
+          pending.messages,
+          [{ role: "tool", tool_call_id: pending.toolCallId, content: result }],
+          segments.slice(),
+        );
       } else {
         if (!completed) throw new Error("Agent 未返回最终消息");
         // 回复成功后按累计消息数触发标题自动生成（每满 10 条一次）。

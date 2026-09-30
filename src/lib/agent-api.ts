@@ -248,35 +248,6 @@ const AKM_LIST_PLUGINS_TOOL: AgentTool = {
   },
 };
 
-// 列出历史 Agent 会话（对应后端内置 akm_list_sessions，无参数）。
-// 只读，作为基础工具始终声明；返回会话元信息（会话名、创建/更新时间、消息数、模型），不含消息正文。
-const AKM_LIST_SESSIONS_TOOL: AgentTool = {
-  type: "function",
-  function: {
-    name: "akm_list_sessions",
-    description: "列出历史 Agent 会话的元信息（会话名、创建/更新时间、消息数、模型），不含消息正文，按更新时间倒序",
-    parameters: { type: "object", properties: {} },
-  },
-};
-
-// 读取历史 Agent 会话（对应后端内置 akm_load_session）。
-// 只读，作为基础工具始终声明；读取指定会话最近若干条消息，用于回顾之前会话的上下文。
-const AKM_LOAD_SESSION_TOOL: AgentTool = {
-  type: "function",
-  function: {
-    name: "akm_load_session",
-    description: "读取历史 Agent 会话的最近若干条消息，用于回顾之前会话的上下文",
-    parameters: {
-      type: "object",
-      properties: {
-        name: { type: "string", description: "会话名（来自 akm_list_sessions 的 name 字段）" },
-        limit: { type: "integer", description: "返回最近的消息条数，1 到 100，默认 20" },
-      },
-      required: ["name"],
-    },
-  },
-};
-
 // 交互澄清工具（对应后端内置 akm_ask_user）：AI 信息不完整/有歧义时主动询问用户，
 // 而不是自己猜测。后端在默认注入与白名单注入（传了 tools）时都可用，仅显式传
 // 空数组 [] 才被排除，因此这里始终声明，保证走白名单时不被丢弃。触发时后端
@@ -998,8 +969,8 @@ export function resolveDeclaredTools(tools: string[]): AgentTool[] {
     AKM_GET_KEYS_SUMMARY_TOOL,
     AKM_GET_CONFIG_TOOL,
     AKM_LIST_PLUGINS_TOOL,
-    AKM_LIST_SESSIONS_TOOL,
-    AKM_LOAD_SESSION_TOOL,
+    // 会话历史工具（akm_list_sessions / akm_load_session）已从服务端移除：
+    // 历史数据的权威副本在浏览器 IndexedDB，由 client_tools 的 ui_* 工具负责。
     AKM_LIST_LOGS_TOOL,
     // 读图工具：后端条件注册（agent_read_image_enabled 开启，默认 true），
     // 给不支持视觉的模型补充识图能力（对话中出现图片时使用），这里始终声明，避免白名单时丢失
@@ -1058,7 +1029,7 @@ export function resolveDeclaredTools(tools: string[]): AgentTool[] {
   return declared;
 }
 
-export type AgentStreamEventName = "reasoning_delta" | "model_delta" | "turn_start" | "tool_call" | "tool_result" | "context_warning" | "ask_user" | "turn_pause" | "final" | "error";
+export type AgentStreamEventName = "reasoning_delta" | "model_delta" | "turn_start" | "tool_call" | "tool_result" | "context_warning" | "ask_user" | "client_tool_call" | "turn_pause" | "final" | "error";
 
 // 上下文占用警告信息（对应后端 context_warning 事件）：
 // 上下文估算已用 / 上限 / 剩余 tokens、占用比例与已压缩次数。
@@ -1089,6 +1060,10 @@ export type AgentStreamEvent = {
     question?: string;
     options?: string[];
     multiple?: boolean;
+    // 客户端工具：client_tool_call 事件携带待本地执行的工具调用（tool_call_id / name /
+    // arguments）与可续跑的工作上下文（messages）。前端执行后用 role: "tool" 消息
+    // 把结果追加入 messages 再重新请求，同一轮 Agent 从该结果继续。
+    tool_call_id?: string;
     // 上下文管理信息：context_warning 事件携带占用估算与比例（平铺字段，
     // 与后端 _sse_event 下发格式一致），final 事件携带 compacted（本次运行自动压缩次数）。
     estimated_tokens?: number;
@@ -1143,6 +1118,7 @@ function createAgentRequestBody(options: {
   messages: AgentMessage[];
   instructions: string;
   tools?: AgentTool[];
+  clientTools?: AgentTool[];
   toolOptions?: { search: boolean; image: boolean };
 }, stream: boolean) {
   return JSON.stringify({
@@ -1152,9 +1128,15 @@ function createAgentRequestBody(options: {
     // 仅当显式声明了工具时才携带 tools 字段（白名单注入）。
     // 未开启任何工具时不传 tools：后端默认不注入联网搜索/图片生成/编辑工具。
     ...(options.tools?.length ? { tools: options.tools } : {}),
+    // 客户端工具：与 tools 独立声明，服务端把调用交回浏览器执行（见 client-tools.ts）。
+    // 独立字段保证只声明客户端工具时不会影响服务端的工具注入策略。
+    ...(options.clientTools?.length ? { client_tools: options.clientTools } : {}),
     ...(options.toolOptions ? { tool_options: options.toolOptions } : {}),
     api_path: "chat/completions",
-    max_turns: 50,
+    // max_turns 不在此硬编码：传 0 表示沿用服务端配置的 agent_max_turns
+    // （否则前端写死的值会悄悄覆盖服务端配置，让人以为配置项没生效）。
+    // 生效值可通过 GET /v1/agent/config 查询。
+    max_turns: 0,
     stream,
   });
 }
@@ -1166,6 +1148,7 @@ function createAgentFormData(options: {
   messages: AgentMessage[];
   instructions: string;
   tools?: AgentTool[];
+  clientTools?: AgentTool[];
   toolOptions?: { search: boolean; image: boolean };
   files: File[];
 }, stream: boolean) {
@@ -1176,9 +1159,11 @@ function createAgentFormData(options: {
   // multipart 场景同样支持 tools：仅当显式声明了工具时才携带，
   // 与纯 JSON 一样按白名单注入声明中列出的工具。
   if (options.tools?.length) form.append("tools", JSON.stringify(options.tools));
+  if (options.clientTools?.length) form.append("client_tools", JSON.stringify(options.clientTools));
   if (options.toolOptions) form.append("tool_options", JSON.stringify(options.toolOptions));
   form.append("api_path", "chat/completions");
-  form.append("max_turns", "50");
+  // 同 JSON 路径：0 表示沿用服务端 agent_max_turns，前端不覆盖。
+  form.append("max_turns", "0");
   form.append("stream", String(stream));
   options.files.forEach(file => form.append("files", file));
   return form;
@@ -1195,6 +1180,7 @@ export async function runAgent(options: {
   messages: AgentMessage[];
   instructions: string;
   tools?: AgentTool[];
+  clientTools?: AgentTool[];
   toolOptions?: { search: boolean; image: boolean };
 }): Promise<AgentResponse> {
   const payload = await requestJson<AgentResponse>("/v1/agent", {
@@ -1225,7 +1211,7 @@ export async function compactMessages(options: {
 }
 
 function isAgentStreamEventName(value: unknown): value is AgentStreamEventName {
-  return value === "reasoning_delta" || value === "model_delta" || value === "turn_start" || value === "tool_call" || value === "tool_result" || value === "context_warning" || value === "ask_user" || value === "turn_pause" || value === "final" || value === "error";
+  return value === "reasoning_delta" || value === "model_delta" || value === "turn_start" || value === "tool_call" || value === "tool_result" || value === "context_warning" || value === "ask_user" || value === "client_tool_call" || value === "turn_pause" || value === "final" || value === "error";
 }
 
 function parseAgentStreamFrame(frame: string): AgentStreamEvent | null {
@@ -1256,6 +1242,7 @@ export async function* runAgentStream(options: {
   messages: AgentMessage[];
   instructions: string;
   tools?: AgentTool[];
+  clientTools?: AgentTool[];
   toolOptions?: { search: boolean; image: boolean };
   files?: File[];
   // 传入中断信号后，点击"停止"会 abort 该请求：前端停止读取，
