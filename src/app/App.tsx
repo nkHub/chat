@@ -598,6 +598,20 @@ export default function App() {
         // 工具结果按 Chat 协议紧跟 assistant 的 tool_calls 之后，因此走 injected
         // （不落会话历史）注入；requestHistory 传空数组，避免把本轮之前的用户/助手
         // 消息再拼一遍导致工作上下文重复。
+        // 回填而不是追加：服务端 client_tool_call 事件下发的 messages 里已带一条
+        // 占位 tool 消息（content 为 {"status":"awaiting_client"}），追加会让 tool
+        // 后面紧跟 tool，部分上游（如 DeepSeek）校验「tool 必须紧跟 assistant 的
+        // tool_calls」直接 400。按 tool_call_id 把真实结果写进占位消息，保证一个
+        // tool_call 恰好对应一条 tool 结果；找不到占位（旧版服务端不下发占位）才追加。
+        const resumeMessages: AgentMessage[] = pending.messages.some(
+          message => message.role === "tool" && message.tool_call_id === pending.toolCallId,
+        )
+          ? pending.messages.map(message =>
+              message.role === "tool" && message.tool_call_id === pending.toolCallId
+                ? { ...message, content: result }
+                : message,
+            )
+          : [...pending.messages, { role: "tool", tool_call_id: pending.toolCallId, content: result }];
         void requestAgent(
           sessionId,
           userMessageId,
@@ -605,8 +619,8 @@ export default function App() {
           [],
           files,
           tools,
-          pending.messages,
-          [{ role: "tool", tool_call_id: pending.toolCallId, content: result }],
+          resumeMessages,
+          [],
           segments.slice(),
         );
       } else {

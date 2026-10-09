@@ -55,8 +55,10 @@ npm run preview
 只读相关一两页。纯逻辑在 `src/lib/session-history.ts`，用 `npm run check:history` 验证
 （esbuild + node，26 项断言：翻页不重不漏、`offset` 越界收敛到最早一页、`limit` 夹紧等）。
 
-服务端把模型调用交回浏览器（`client_tool_call` 事件），前端本地执行后把结果作为
-`role: "tool"` 消息追加入 `messages` 续跑同一轮 Agent（见 `App.tsx` 的 `client_tool_call` 分支）。
+服务端把模型调用交回浏览器（`client_tool_call` 事件），前端本地执行后按 `tool_call_id` 把结果
+**回填**进返回 `messages` 里的占位 tool 消息（`{"status": "awaiting_client"}`）再续跑同一轮 Agent
+（见 `App.tsx` 的 `client_tool_call` 分支）——不追加新 `role: "tool"` 消息，否则连续两条 tool
+会被 DeepSeek 等严格校验「`tool` 必须紧跟 assistant `tool_calls`」的上游以 400 拒绝。
 Agent 服务端已彻底移除对话历史落盘；旧版本遗留的 `~/.akm/agent_sessions/` 会在更新包缓存清理开启时随维护流程永久删除。协议细节见 AKM 仓库 `akm/agent_runtime/agent.md` 的「客户端工具执行」。
 
 ### 模型
