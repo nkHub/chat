@@ -1,6 +1,6 @@
 import { Fragment, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
-import { ArrowDown, CircleStop, ImageIcon, Loader2, Lock, Paperclip, PanelLeftClose, PanelLeftOpen, Search, Send, X } from "lucide-react";
+import { ArrowDown, CircleStop, ImageIcon, Loader2, Lock, Paperclip, PanelLeftClose, PanelLeftOpen, Pencil, Search, Send, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
@@ -178,6 +178,8 @@ function ChatPage({
   onToolsChange,
   pendingGuide,
   onCancelGuide,
+  onEditGuide,
+  onSendGuideNow,
   onCompact,
   messagesLoading,
   // 过程时间线的手动展开/收起：由 App 写回 message.processOpen 并随会话持久化
@@ -203,9 +205,13 @@ function ChatPage({
   onToolsChange: (tools: string[]) => void;
   pendingGuide?: string;
   onCancelGuide?: () => void;
+  /** 撤回挂起的引导：返回内容与附件交给输入框填入；返回 null 表示当前没有挂起内容 */
+  onEditGuide?: () => { content: string; attachments: File[] } | null;
+  /** 立即发送挂起的引导：结束当前轮并直接发出（不等自然停顿） */
+  onSendGuideNow?: () => void;
   onCompact: () => Promise<string | null>;
   // 过程时间线的展开/收起：把用户选择写回消息（随会话持久化），而非只存在组件内 state
-  onToggleProcess?: (messageId: string, open: boolean) => void;
+  onToggleProcess?: (messageId: string, blockKey: string, open: boolean) => void;
   // 结构化布局（AG-UI）的视图切换：toText=true 切成原文，false 切回卡片
   // 首次打开时会话历史仍在从 IndexedDB 恢复：用骨架占位，避免先闪一下「开始对话」
   messagesLoading?: boolean;
@@ -553,6 +559,16 @@ function ChatPage({
     });
   };
 
+  // 撤回挂起的引导（编辑）：把内容与附件送回输入框，方便改完再发。
+  // 挂起态本身是「已提交但未插入」，撤回等于撤销这次提交；附件复用同一条预览生成链路。
+  const takeBackGuideToInput = () => {
+    const draft = onEditGuide?.();
+    if (!draft) return;
+    setInput(draft.content);
+    if (draft.attachments.length > 0) appendAttachmentFiles(draft.attachments);
+    textareaRef.current?.focus();
+  };
+
   // 清空附件并释放所有图片预览 URL，避免 objectURL 泄漏。
   const clearAttachments = () => {
     setAttachments(prev => {
@@ -645,7 +661,15 @@ function ChatPage({
                       // 展开策略：进行中默认展开（能看到当前做到哪一步），
                       // 结束后默认收起（只留「N 个步骤 已处理完 X.Xs」一行）；
                       // 用户手动切换后写回 message.processOpen，随会话一起持久化。
-                      const processOpen = message.processOpen ?? message.status === "sending";
+                      // 展开状态**按块**记录：key 用该块首段下标（与下面 React key 同一口径）。
+                      // 同一条消息里正文会把过程切成多个块，若共用一个布尔值，
+                      // 点开任意一个组会让整条消息的所有组一起展开。
+                      const blockKey = String(block.segmentIndexes[0]);
+                      // 兼容旧数据：早期存的是消息级 boolean，此时所有块共用该值作为初值。
+                      const storedOpen = message.processOpen;
+                      const legacyOpen = typeof storedOpen === "boolean" ? storedOpen : undefined;
+                      const blockOpen = typeof storedOpen === "object" && storedOpen !== null ? storedOpen[blockKey] : undefined;
+                      const processOpen = blockOpen ?? legacyOpen ?? message.status === "sending";
                       const runDurationMs = message.runStartedAt && message.runEndedAt && message.runEndedAt > message.runStartedAt
                         ? message.runEndedAt - message.runStartedAt
                         : 0;
@@ -654,7 +678,7 @@ function ChatPage({
                           key={`process-${block.segmentIndexes[0]}`}
                           block={block}
                           open={processOpen}
-                          onToggle={() => onToggleProcess?.(message.id, !processOpen)}
+                          onToggle={() => onToggleProcess?.(message.id, blockKey, !processOpen)}
                           runDurationMs={runDurationMs}
                         />
                       );
@@ -827,7 +851,13 @@ function ChatPage({
           {pendingGuide ? (
             <div className="flex items-center justify-between gap-2 border-t border-border/60 px-4 py-1.5 text-xs text-muted-foreground">
               <span className="truncate">引导已挂起：{pendingGuide}</span>
-              <button type="button" aria-label="撤消引导" title="撤消引导" onClick={() => onCancelGuide?.()} className="ml-0.5 shrink-0 text-muted-foreground/70 hover:text-foreground"><X size={12} /></button>
+              <div className="flex shrink-0 items-center gap-1">
+                {/* 立即发送：不等自然停顿，直接结束当前轮并发出这条引导（已输出内容保留） */}
+                <button type="button" onClick={() => onSendGuideNow?.()} className="rounded px-1.5 py-0.5 text-[11px] font-medium text-foreground/70 transition-colors hover:bg-muted hover:text-foreground">立即发送</button>
+                {/* 撤回输入框：把挂起内容与附件送回输入框，方便改完再发 */}
+                <button type="button" aria-label="撤回输入框" title="撤回输入框编辑" onClick={takeBackGuideToInput} className="shrink-0 rounded p-0.5 text-muted-foreground/70 transition-colors hover:bg-muted hover:text-foreground"><Pencil size={12} /></button>
+                <button type="button" aria-label="撤消引导" title="撤消引导" onClick={() => onCancelGuide?.()} className="shrink-0 rounded p-0.5 text-muted-foreground/70 transition-colors hover:bg-muted hover:text-foreground"><X size={12} /></button>
+              </div>
             </div>
           ) : <div className="h-px" />}
           <textarea

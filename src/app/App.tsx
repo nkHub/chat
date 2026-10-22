@@ -32,6 +32,24 @@ function buildRequestHistory(list: Message[]): Message[] {
   return [...summaries, ...original.slice(-COMPACT_KEEP_RECENT)];
 }
 
+// 立即发送会直接中断在途那一轮：把它就地收尾 —— 状态转 success、清掉流式提示、补结束时间，
+// 并把仍在 running 的工具段标为失败。不收尾的话界面上工具步会一直转圈、过程时间线也一直
+// 显示"进行中"。这类「工具结果未回填」的半截轮不会污染上下文：历史只发正文、不含工具结构，
+// 且正文为空时会被 helpers.toAgentMessages 过滤掉。
+function settleInterruptedMessage(message: Message): Message {
+  if (message.status !== "sending") return message;
+  return {
+    ...message,
+    status: "success",
+    streamStatus: undefined,
+    runEndedAt: Date.now(),
+    segments: message.segments?.map(segment =>
+      segment.type === "tool" && segment.status === "running"
+        ? { ...segment, status: "error" as const, endedAt: segment.endedAt ?? Date.now() }
+        : segment),
+  };
+}
+
 export default function App() {
   // 已保存的聊天状态：IndexedDB 读取是异步的，故初始为 null，
   // 挂载后经 loadChatState 恢复；stateLoaded 标记恢复完成，
@@ -704,16 +722,21 @@ export default function App() {
     }
   };
 
-  const sendMessage = (content: string, attachments: File[] = [], tools: string[] = [], skillRef?: { id: string; name: string }, sessionRefs: { id: string; title: string }[] = []) => {
+  const sendMessage = (content: string, attachments: File[] = [], tools: string[] = [], skillRef?: { id: string; name: string }, sessionRefs: { id: string; title: string }[] = [], force = false) => {
     // 当前会话仍有发送中/生成中的消息：不立即发送，而是把输入暂存为"中途引导"，
     // 等后端在自然停顿点（turn_pause 事件）下发时自动中断当前轮并插入续跑。
+    // force=true 服务于「立即发送挂起的引导」：用户主动放弃等待自然停顿，此时必须跳过
+    // 挂起分支，否则这条消息会被再次挂起、形成回环。
     const sessionId = activeSession || `new-${Date.now()}`;
     const existing = allMessages[sessionId] ?? [];
-    if (existing.some(message => message.status === "sending")) {
+    if (!force && existing.some(message => message.status === "sending")) {
       pendingGuideRef.current = { content, attachments, tools };
       setPendingGuide(content || (attachments.length ? attachments.map(file => file.name).join(", ") : ""));
       return;
     }
+    // force 时把仍在途的消息就地收尾：历史里不能留 status=sending 的半截占位，
+    // 否则既会被再次判定为"进行中"，也会把半成品 assistant 消息发给服务端。
+    const settled = force ? existing.map(settleInterruptedMessage) : existing;
 
     const id = `${sessionId}-user-${Date.now()}`;
     const message: Message = {
@@ -727,8 +750,14 @@ export default function App() {
       ...(skillRef ? { skillRef } : {}),
       ...(sessionRefs && sessionRefs.length > 0 ? { sessionRefs } : {}),
     };
-    const requestHistory = [...buildRequestHistory(existing), message];
-    setAllMessages(prev => ({ ...prev, [sessionId]: [...(prev[sessionId] ?? []), message] }));
+    const requestHistory = [...buildRequestHistory(settled), message];
+    setAllMessages(prev => {
+      const current = prev[sessionId] ?? [];
+      // force（立即发送）：在途消息就地收尾后再追加新消息，
+      // 避免旧的 abort 收尾把 status 写回、或历史里残留半截 assistant 占位。
+      const base = force ? current.map(settleInterruptedMessage) : current;
+      return { ...prev, [sessionId]: [...base, message] };
+    });
     setSessions(prev => {
       if (!prev.some(session => session.id === sessionId)) {
         return [{ id: sessionId, title: content.slice(0, 22), time: nowTime(), autoTitled: true }, ...prev];
@@ -745,10 +774,33 @@ export default function App() {
   // 中断当前正在生成的回复：abort 流式请求，保留已输出内容并收尾。
   const stopReply = () => { activeRequestRef.current?.abort(); };
 
-  // 过程时间线的展开/收起：直接写回该消息的 processOpen 字段。
+  // 挂起引导的「撤回输入框」：把内容与附件交还给输入框（chat 层负责填入并聚焦），
+  // 同时清掉挂起态 —— 等价于撤销这次"已发送但尚未插入"的提交。
+  const takeBackPendingGuide = () => {
+    const guide = pendingGuideRef.current;
+    if (!guide) return null;
+    pendingGuideRef.current = null;
+    setPendingGuide("");
+    return { content: guide.content, attachments: guide.attachments };
+  };
+
+  // 挂起引导的「立即发送」：不再等自然停顿，先中断当前轮（已输出内容保留），
+  // 再以 force 方式发出这条引导，让新一轮立刻在完整历史上开始。
+  const sendPendingGuideNow = () => {
+    const guide = pendingGuideRef.current;
+    if (!guide) return;
+    pendingGuideRef.current = null;
+    setPendingGuide("");
+    activeRequestRef.current?.abort();
+    sendMessage(guide.content, guide.attachments, guide.tools, undefined, [], true);
+  };
+
+  // 过程时间线的展开/收起：按「消息 + 过程块」写回该消息的 processOpen 映射。
   // 遍历所有会话而不只看当前会话，是因为列表渲染可能来自别的会话（side panel 场景），
   // 用 messageId 全局唯一即可定位，避免「点了没反应」。
-  const toggleMessageProcess = (messageId: string, open: boolean) => {
+  // blockKey 是该过程块首段的下标：同一消息里正文会把过程切成多个块，
+  // 只有逐块记录才能做到「点开一个不影响其它组」。
+  const toggleMessageProcess = (messageId: string, blockKey: string, open: boolean) => {
     setAllMessages(prev => {
       let changed = false;
       const next: Record<string, Message[]> = {};
@@ -756,7 +808,11 @@ export default function App() {
         const updated = list.map(message => {
           if (message.id !== messageId) return message;
           changed = true;
-          return { ...message, processOpen: open };
+          // 旧数据可能是消息级 boolean（所有块共用）：先摊平成映射，再按块写入，
+          // 这样切换一次就自然迁移成新结构，其它块保持各自的默认态。
+          const sharedOpen = message.processOpen;
+          const openMap = typeof sharedOpen === "object" && sharedOpen !== null ? sharedOpen : {};
+          return { ...message, processOpen: { ...openMap, [blockKey]: open } };
         });
         next[key] = updated;
       }
@@ -903,7 +959,7 @@ export default function App() {
     if (activePage === "automation") return <AutomationPage sidebarOpen={sidebarOpen} onToggle={() => setSidebarOpen(value => !value)} models={models} defaultModelKey={selectedModel?.key ?? ""} />;
     if (activePage === "workflow") return <WorkflowPage sidebarOpen={sidebarOpen} onToggle={() => setSidebarOpen(value => !value)} models={models} />;
     if (activePage === "assistant") return <AssistantPage sidebarOpen={sidebarOpen} onToggle={() => setSidebarOpen(value => !value)} assistants={assistants} onAdd={(name, prompt) => setAssistants(prev => [{ id: `custom-${Date.now()}`, name, description: prompt, prompt, icon: Bot, color: "bg-primary/10 text-primary" }, ...prev])} onEdit={(id, name, prompt) => setAssistants(prev => prev.map(assistant => assistant.id === id ? { ...assistant, name, ...(prompt ? { prompt, description: prompt } : {}) } : assistant))} onStart={assistantId => { const assistant = assistants.find(candidate => candidate.id === assistantId); const assistantName = assistant?.name ?? "助手"; const sessionId = `${assistantId}-${Date.now()}`; const message: Message = { id: `${assistantId}-message`, role: "user", content: `你好，请以「${assistantName}」的身份来帮我。`, time: nowTime(), status: "success" }; setSessions(prev => [{ id: sessionId, title: assistantName, time: nowTime(), ...(assistant?.prompt ? { instructions: assistant.prompt } : {}) }, ...prev]); setAllMessages(prev => ({ ...prev, [sessionId]: [message] })); setActiveSession(sessionId); setActivePage("chat"); }} onDelete={assistantId => setAssistants(prev => prev.filter(assistant => assistant.id !== assistantId))} />;
-    return <ChatPage session={activeSessionData} sessions={sessions} messages={messages} model={selectedModel} models={models} modelsLoading={modelsLoading} modelsError={modelsError} sidebarOpen={sidebarOpen} onToggleSidebar={() => setSidebarOpen(value => !value)} onModelChange={model => { setSelectedModel(model); if (activeSession) setSessions(prev => prev.map(session => session.id === activeSession ? { ...session, modelKey: model.key } : session)); }} onReloadModels={() => { void loadModels(); }}     onSend={(contentValue, attachments, tools, skillRef, sessionRefs) => sendMessage(contentValue, attachments, tools, skillRef, sessionRefs)} onNewSession={newSession} onRetry={retryMessage} onStop={stopReply} onAnswer={answerQuestion} onCompact={handleCompact} onToggleProcess={toggleMessageProcess} messagesLoading={!stateLoaded} tools={activeSessionData?.tools ?? []} onToolsChange={tools => { if (!activeSession) return; setSessions(prev => prev.map(session => session.id === activeSession ? { ...session, tools } : session)); }} pendingGuide={pendingGuide} onCancelGuide={() => { pendingGuideRef.current = null; setPendingGuide(""); }} />;
+    return <ChatPage session={activeSessionData} sessions={sessions} messages={messages} model={selectedModel} models={models} modelsLoading={modelsLoading} modelsError={modelsError} sidebarOpen={sidebarOpen} onToggleSidebar={() => setSidebarOpen(value => !value)} onModelChange={model => { setSelectedModel(model); if (activeSession) setSessions(prev => prev.map(session => session.id === activeSession ? { ...session, modelKey: model.key } : session)); }} onReloadModels={() => { void loadModels(); }}     onSend={(contentValue, attachments, tools, skillRef, sessionRefs) => sendMessage(contentValue, attachments, tools, skillRef, sessionRefs)} onNewSession={newSession} onRetry={retryMessage} onStop={stopReply} onAnswer={answerQuestion} onCompact={handleCompact} onToggleProcess={toggleMessageProcess} messagesLoading={!stateLoaded} tools={activeSessionData?.tools ?? []} onToolsChange={tools => { if (!activeSession) return; setSessions(prev => prev.map(session => session.id === activeSession ? { ...session, tools } : session)); }} pendingGuide={pendingGuide} onCancelGuide={() => { pendingGuideRef.current = null; setPendingGuide(""); }} onEditGuide={takeBackPendingGuide} onSendGuideNow={sendPendingGuideNow} />;
   }, [activePage, activeSessionData, allMessages, messages, models, modelsLoading, modelsError, selectedModel, sidebarOpen, assistants, sessions, pendingGuide]);
 
   return (

@@ -415,6 +415,14 @@ const TOOLTIP_STYLE = {
   border: "1px solid var(--border)",
   color: "var(--popover-foreground)",
 };
+// tooltip 每行的颜色：默认取该序列的 stroke/fill，而图表里我们只给了 tailwind 类、
+// 取不到具体色值，会落到暗色默认值上「暗底暗字」看不清 —— 显式指到气泡前景色。
+const TOOLTIP_ITEM_STYLE = { color: "var(--popover-foreground)" };
+const TOOLTIP_LABEL_STYLE = { color: "var(--muted-foreground)" };
+// recharts 的 hover 光标：BarChart 默认是一整条 fill:#ccc/50% 的分类带，暗色下会糊成
+// 一根浅灰柱子（看起来像「这根柱换色了」）；折线 / 面积图默认是一条 #ccc 竖线。
+const TOOLTIP_CURSOR_BAR = { fill: "rgba(148, 163, 184, 0.12)" };
+const TOOLTIP_CURSOR_LINE = { stroke: "rgba(148, 163, 184, 0.45)" };
 
 function RenderChart({ block }: { block: ChartBlock }) {
   const h = block.height ?? 220;
@@ -444,6 +452,8 @@ function RenderChart({ block }: { block: ChartBlock }) {
             <RechartsTooltip
               formatter={(v: number) => [`${v}`, block.series[0]?.label ?? ""]}
               contentStyle={TOOLTIP_STYLE}
+              itemStyle={TOOLTIP_ITEM_STYLE}
+              labelStyle={TOOLTIP_LABEL_STYLE}
             />
             <Legend iconSize={10} wrapperStyle={LEGEND_STYLE} />
           </PieChart>
@@ -452,7 +462,12 @@ function RenderChart({ block }: { block: ChartBlock }) {
             <CartesianGrid strokeDasharray="3 3" stroke={GRID_STROKE} />
             <XAxis dataKey={block.xKey} tick={AXIS_STYLE} />
             <YAxis tick={AXIS_STYLE} />
-            <RechartsTooltip contentStyle={TOOLTIP_STYLE} />
+            <RechartsTooltip
+              contentStyle={TOOLTIP_STYLE}
+              itemStyle={TOOLTIP_ITEM_STYLE}
+              labelStyle={TOOLTIP_LABEL_STYLE}
+              cursor={TOOLTIP_CURSOR_LINE}
+            />
             {block.series.length > 1 && <Legend iconSize={10} wrapperStyle={LEGEND_STYLE} />}
             {block.series.map((s, i) => (
               <Area key={s.key} type="monotone" dataKey={s.key} name={s.label}
@@ -466,7 +481,12 @@ function RenderChart({ block }: { block: ChartBlock }) {
             <CartesianGrid strokeDasharray="3 3" stroke={GRID_STROKE} />
             <XAxis dataKey={block.xKey} tick={AXIS_STYLE} />
             <YAxis tick={AXIS_STYLE} />
-            <RechartsTooltip contentStyle={TOOLTIP_STYLE} />
+            <RechartsTooltip
+              contentStyle={TOOLTIP_STYLE}
+              itemStyle={TOOLTIP_ITEM_STYLE}
+              labelStyle={TOOLTIP_LABEL_STYLE}
+              cursor={TOOLTIP_CURSOR_LINE}
+            />
             {block.series.length > 1 && <Legend iconSize={10} wrapperStyle={LEGEND_STYLE} />}
             {block.series.map((s, i) => (
               <Line key={s.key} type="monotone" dataKey={s.key} name={s.label}
@@ -479,7 +499,12 @@ function RenderChart({ block }: { block: ChartBlock }) {
             <CartesianGrid strokeDasharray="3 3" stroke={GRID_STROKE} />
             <XAxis dataKey={block.xKey} tick={AXIS_STYLE} />
             <YAxis tick={AXIS_STYLE} />
-            <RechartsTooltip contentStyle={TOOLTIP_STYLE} />
+            <RechartsTooltip
+              contentStyle={TOOLTIP_STYLE}
+              itemStyle={TOOLTIP_ITEM_STYLE}
+              labelStyle={TOOLTIP_LABEL_STYLE}
+              cursor={TOOLTIP_CURSOR_BAR}
+            />
             {block.series.length > 1 && <Legend iconSize={10} wrapperStyle={LEGEND_STYLE} />}
             {block.series.map((s, i) => (
               <Bar key={s.key} dataKey={s.key} name={s.label}

@@ -72,9 +72,12 @@ type Message = {
   // 比组内首末步跨度更接近用户感知的整轮耗时（含最后一次模型输出）。
   runStartedAt?: number;
   runEndedAt?: number;
-  // 过程时间线的折叠状态：true=展开看步骤、false=收起只看标题行。
-  // 用户手动切换后写入消息并随会话持久化（IndexedDB 整体存 StoredChatState）。
-  processOpen?: boolean;
+  // 过程时间线的折叠状态：key = 该过程块**首段下标**（lib/process-groups 的 segmentIndexes[0]，
+  // 与 React key 同一口径），value = 该块是否展开。
+  // 一条消息通常有多个过程块（正文会打断分组），必须逐块记录 —— 早先用单个 boolean，
+  // 点开任意一个组会让同一消息里所有组一起展开。
+  // 旧数据里该字段仍是消息级 boolean，读取时按「所有块共用」兼容。
+  processOpen?: Record<string, boolean> | boolean;
   // 结构化布局（AG-UI）：由服务端 `custom` 事件下发，已在服务端过 layout_schema 校验。
   // 它只是**增强层**——content 始终是完整 markdown；布局缺失/校验失败/版本不认，
   // 甚至整个前端回退到旧版本，都会按 content 正常渲染（见「兼容约定」条目）。

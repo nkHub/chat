@@ -1,4 +1,4 @@
-import { Children, isValidElement, memo, useContext, useState } from "react";
+import { Children, isValidElement, memo, useContext, useMemo, useState } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
@@ -7,6 +7,7 @@ import "katex/dist/katex.min.css";
 import { Brain, Check, Copy } from "lucide-react";
 import { nodeToText } from "./helpers";
 import { PreviewContext } from "./preview";
+import { highlightCode } from "@/lib/code-highlight";
 
 const MARKDOWN_COMPONENTS: Components = {
   h1: ({ node: _node, ...props }) => <h1 className="mb-1 mt-3 text-lg font-semibold text-foreground" {...props} />,
@@ -56,6 +57,9 @@ const MARKDOWN_COMPONENTS: Components = {
 
 function CodeBlock({ code, language }: { code: string; language: string }) {
   const [copied, setCopied] = useState(false);
+  // 高亮结果按 (code, language) 记忆：完整代码块通常只算一次；
+  // 未标注 / 未知语言返回 null，回落成纯文本（宁可没颜色，也不能让代码块消失）。
+  const highlighted = useMemo(() => highlightCode(code, language), [code, language]);
   return (
     <div className="my-3 overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950 text-xs font-mono">
       <div className="flex items-center justify-between border-b border-zinc-800 bg-zinc-900 px-3 py-1.5">
@@ -73,7 +77,11 @@ function CodeBlock({ code, language }: { code: string; language: string }) {
           {copied ? "已复制" : "复制"}
         </button>
       </div>
-      <pre className="overflow-x-auto p-3 leading-relaxed text-zinc-300"><code>{code}</code></pre>
+      <pre className="overflow-x-auto p-3 leading-relaxed text-zinc-300">
+        {highlighted
+          ? <code className="code-hl hljs" dangerouslySetInnerHTML={{ __html: highlighted }} />
+          : <code>{code}</code>}
+      </pre>
     </div>
   );
 }
@@ -86,6 +94,8 @@ function CodeBlock({ code, language }: { code: string; language: string }) {
 // 代码块会"先宽后突然收窄"。代码块本身无气泡框，用水平外距补齐同等内缩。
 function StreamingCodeBlock({ fenceLine, code }: { fenceLine: string; code: string }) {
   const language = /language-(\w+)/.exec(fenceLine)?.[1] ?? "";
+  // 生成过程中也着色（边生成边高亮），光标跟在最后一行末尾继续闪。
+  const highlighted = useMemo(() => highlightCode(code, language), [code, language]);
   return (
     <div className="mx-4 my-3 overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950 text-xs font-mono">
       <div className="flex items-center justify-between border-b border-zinc-800 bg-zinc-900 px-3 py-1.5">
@@ -93,7 +103,9 @@ function StreamingCodeBlock({ fenceLine, code }: { fenceLine: string; code: stri
         <span className="flex items-center gap-1 text-[11px] text-zinc-500">生成中…</span>
       </div>
       <pre className="overflow-x-auto p-3 leading-relaxed text-zinc-300">
-        <code>{code}<span className="streaming-caret text-zinc-200">▌</span></code>
+        {highlighted
+          ? <><code className="code-hl hljs" dangerouslySetInnerHTML={{ __html: highlighted }} /><span className="streaming-caret text-zinc-200">▌</span></>
+          : <code>{code}<span className="streaming-caret text-zinc-200">▌</span></code>}
       </pre>
     </div>
   );

@@ -181,3 +181,64 @@
     line-height: 1.5;
   }
 }
+
+/* ─── 代码块语法高亮（highlight.js 的 token 类名）────────────────────────────
+   代码块本身是固定深色底（bg-zinc-950 / text-zinc-300，见 markdown.tsx 的 CodeBlock），
+   浅色与暗色主题下外观一致，因此只需要一套深色配色，不必写 dark: 变体。 */
+.code-hl {
+  /* 与容器的 text-zinc-300 对齐；hljs 只给 token 上色，其余保持中性灰 */
+  color: #d4d4d8;
+}
+.code-hl .hljs-comment,
+.code-hl .hljs-quote {
+  color: #71717a;
+  font-style: italic;
+}
+.code-hl .hljs-keyword,
+.code-hl .hljs-selector-tag,
+.code-hl .hljs-literal,
+.code-hl .hljs-doctag,
+.code-hl .hljs-formula {
+  color: #c792ea;
+}
+.code-hl .hljs-string,
+.code-hl .hljs-regexp,
+.code-hl .hljs-addition,
+.code-hl .hljs-meta .hljs-string {
+  color: #9ece6a;
+}
+.code-hl .hljs-number,
+.code-hl .hljs-symbol,
+.code-hl .hljs-bullet,
+.code-hl .hljs-link {
+  color: #f78c6c;
+}
+.code-hl .hljs-title,
+.code-hl .hljs-section,
+.code-hl .hljs-name {
+  color: #82aaff;
+}
+.code-hl .hljs-attr,
+.code-hl .hljs-attribute,
+.code-hl .hljs-property,
+.code-hl .hljs-variable,
+.code-hl .hljs-template-variable,
+.code-hl .hljs-params,
+.code-hl .hljs-type,
+.code-hl .hljs-built_in,
+.code-hl .hljs-class .hljs-title {
+  color: #ffcb6b;
+}
+.code-hl .hljs-operator,
+.code-hl .hljs-punctuation {
+  color: #89ddff;
+}
+.code-hl .hljs-meta,
+.code-hl .hljs-tag,
+.code-hl .hljs-selector-id,
+.code-hl .hljs-selector-class,
+.code-hl .hljs-deletion {
+  color: #f07178;
+}
+.code-hl .hljs-emphasis { font-style: italic; }
+.code-hl .hljs-strong { font-weight: 600; }

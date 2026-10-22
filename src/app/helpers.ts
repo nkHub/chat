@@ -110,6 +110,9 @@ function toAgentMessages(messages: Message[]): AgentMessage[] {
   return messages
     .filter(message => message.role === "user" || message.role === "assistant")
     .filter(message => message.status !== "send_failed" && message.status !== "recv_failed")
+    // assistant 正文为空时不发：中止当前轮（「停止」或「立即发送挂起的引导」）会留下
+    // 没有正文的半截轮次，空 assistant 消息各家上游容忍度不一，直接不发最稳。
+    .filter(message => !(message.role === "assistant" && !message.content.trim()))
     .map(message => {
       // 用户消息携带 skill 引用（chip）：把对应 Skill 的模板展开成实际发给模型的内容，
       // {{input}} 替换为用户原文（如「翻译」→「请把下面的内容翻译成…需要翻译的内容：原文」）。
