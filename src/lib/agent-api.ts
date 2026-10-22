@@ -1029,7 +1029,7 @@ export function resolveDeclaredTools(tools: string[]): AgentTool[] {
   return declared;
 }
 
-export type AgentStreamEventName = "reasoning_delta" | "model_delta" | "turn_start" | "tool_call" | "tool_result" | "context_warning" | "ask_user" | "client_tool_call" | "turn_pause" | "final" | "error";
+export type AgentStreamEventName = "reasoning_delta" | "model_delta" | "turn_start" | "tool_call" | "tool_result" | "context_warning" | "ask_user" | "client_tool_call" | "turn_pause" | "final" | "error" | "custom";
 
 // 上下文占用警告信息（对应后端 context_warning 事件）：
 // 上下文估算已用 / 上限 / 剩余 tokens、占用比例与已压缩次数。
@@ -1071,6 +1071,15 @@ export type AgentStreamEvent = {
     remaining_tokens?: number;
     ratio?: number;
     compacted?: number;
+    // 时间戳（毫秒，事件生成时刻）：服务端在本机 _sse_event 统一注入，所有事件都带。
+    // 前端据此计算过程时间线里每一步与整轮的真实耗时（不含浏览器到服务的网络抖动）。
+    // 旧服务端不返回该字段，前端自动回落到本机 Date.now() 打点。
+    ts?: number;
+    // AG-UI CUSTOM 事件：name（复用上方的工具名字段，同一 SSE 载荷共用）标识自定义
+    // 事件种类，当前只有 "akm.layout"；value 是布局文档本体（AGUILayout，已在服务端
+    // 过 layout_schema 校验）。旧前端不认识该事件名，会在 isAgentStreamEventName
+    // 处直接丢弃，流不受影响。
+    value?: unknown;
     // 自然停顿点：turn_pause 事件在当前轮 LLM 输出完整收尾处下发，携带完整工作上下文
     // 快照（messages）。客户端若要在回复中途插入引导，可在收到该事件后携带快照续跑。
   };
@@ -1211,7 +1220,7 @@ export async function compactMessages(options: {
 }
 
 function isAgentStreamEventName(value: unknown): value is AgentStreamEventName {
-  return value === "reasoning_delta" || value === "model_delta" || value === "turn_start" || value === "tool_call" || value === "tool_result" || value === "context_warning" || value === "ask_user" || value === "client_tool_call" || value === "turn_pause" || value === "final" || value === "error";
+  return value === "reasoning_delta" || value === "model_delta" || value === "turn_start" || value === "tool_call" || value === "tool_result" || value === "context_warning" || value === "ask_user" || value === "client_tool_call" || value === "turn_pause" || value === "final" || value === "error" || value === "custom";
 }
 
 function parseAgentStreamFrame(frame: string): AgentStreamEvent | null {

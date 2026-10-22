@@ -20,6 +20,17 @@ npm run build
 npm run preview
 ```
 
+打包给 AKM `agent_chat` 插件时**必须**带两个环境变量，缺一个就出错：
+
+```bash
+VITE_BASE='./' VITE_AKM_API_URL='' npm run build
+```
+
+- `VITE_BASE='./'`：产物资源用相对路径。漏掉会写出 `/assets/...`，插件挂在 `/chat` 子路径下时脚本与样式全 404（`tests/test_agent_chat_plugin.py` 会直接失败）。
+- `VITE_AKM_API_URL=''`：`API_BASE_URL` 默认是 `/akm-api`（开发期由 Vite 代理去掉前缀），同源部署必须**显式置空**。漏掉时所有请求会打到 `/akm-api/v1/models`、`/akm-api/v1/agent`，而插件没有这个前缀 → 模型列表为空、发送直接失败。
+
+构建后自检：`grep -c 'akm-api' dist/assets/*.js` 应为 **0**，`dist/index.html` 里的引用应为 `./assets/...`。
+
 开发 / 预览服务器会把 `/akm-api` 前缀代理到 AKM 服务（`http://127.0.0.1:8800`），
 并去掉 `/akm-api` 前缀转发。若 AKM 运行在其他端口，修改 `vite.config.ts` 中的
 `akmProxy.target` 即可。
@@ -27,7 +38,7 @@ npm run preview
 ## 功能
 
 ### 对话
-- 流式输出：思考（reasoning）与正文分段展示，工具调用内联折叠
+- 流式输出：思考（reasoning）与正文分段展示；一轮内的思考与工具调用聚合为一条**可折叠过程时间线**（`N 个步骤 已处理完 X.Xs`，每步为人话动作 + 结果摘要 + 耗时，点开可看原始参数/结果）
 - 支持附件上传（图片转 `image_url`、文本按 UTF-8 读取，经 multipart 提交）
 - 消息懒渲染 + 向上加载历史；失败可重试
 - 回复进行中禁止再次发送，避免并发请求打乱上下文
@@ -83,6 +94,17 @@ Agent 服务端已彻底移除对话历史落盘；旧版本遗留的 `~/.akm/ag
 
 ### 外观
 - 多套主题色 + 浅色 / 深色 / 跟随系统模式
+- 对话列宽可拖拽：消息区与输入框共用同一宽度与同一套 padding（`aether-ai-chat-column-width`）；左右各一个竖向把手：热区 12px 宽、只覆盖消息区（**不含输入框**），视觉是 2px×40px 圆角胶囊（默认透明，进入热区或聚焦才显现并拉到 56px、拖拽变主题色），支持双击复位与 ←/→ 微调，拖任一侧对称伸缩（560–1400px），双击复位 896px；**容器宽度不足 720px 时把手不渲染**（`ResizeObserver` 判定）
+- 回到底部：不在底部时输入框上方浮出小圆按钮，点击平滑滚到底并恢复吸附
+- 加载反馈：向上加载更早消息显示 spinner 文案；首次打开恢复大量会话时用底部对齐骨架占位
+- 夜间模式可读性：暗色主题的 `--destructive` 已提亮（暗底红字 6.85:1），低透明度文字（`text-foreground/25|30`）统一改为 `text-muted-foreground`（7.66:1），卡片悬浮操作按钮补 `dark:hover:bg-white/10`
+- 界面减负：消息不显示头像（正文铺满整列）；助手正文不套卡片外壳；消息操作区只保留「复制」（hover 才显现，Layout JSON 调试入口已移除）；过程时间线零卡片、无连接线，层级靠 12px 缩进，图标 15px 按动作区分，耗时只在组头，中间段单行省略（摘要先裁 300 字符）、无状态词的行直接铺满而状态固定宽度，渲染类工具不进时间线
+- 过程时间线展开策略：思考步生成中默认展开、结束自动折叠；工具步始终默认折叠；手动点过即固定
+- 结构化布局：配置 `agent_layout_model` 后，回答的正文**保持不变**，卡片作为补充追加在正文下方（表格/指标/对比/图表等）；`akm.layout` 事件在 `final` 之后补发，正文先落地、卡片后到，失败即回落纯 markdown。**不提供「原文 / 卡片」切换**（渲染器第一帧锁定，切换等于中途换渲染器）
+- 渲染工具模式：配置 `agent_render_enabled`（服务端，默认关闭）后主 Agent 可直接调 `akm_render` 出卡片，组件 schema 来自服务端 `render_schema.json`；卡片在工具调用的位置**原位渲染**，时间线里不显示这一步；与后置的 `agent_layout_model` 模式互斥
+- 气泡与层次：用户消息气泡最宽 `80%`（长消息不会与整列齐平）；过程时间线展开的思考正文与工具 JSON 用 `text-muted-foreground` 一档更灰，与正文拉开层次
+- 卡片暗色适配：自绘卡片（stats / cards / kanban / alert / progress / map / chart）的配色映射表全部补 `dark:`（`bg-*-50` → `dark:bg-*-500/10`、`text-*-700` → `dark:text-*-300`），卡片壳 `bg-white` → `bg-card`；图表色改用 `stroke-chart-N`/`fill-chart-N` 类（SVG 的 `fill`/`stroke` attribute 不认 `var()`），轴标签 `fill="currentColor"` + `text-muted-foreground`，图例与 tooltip 走 `--muted-foreground` / `--popover`；地图 4 套 6 档热力色阶在暗色下改为同色相透明度叠层
+- 渲染工具模式补充：开启后服务端自动注入渲染指引（否则模型不会主动调）；单次上限 3 块、鼓励分次调用；卡片淡入 300ms（`motion-safe`，尊重 reduced-motion）
 
 ## 自动生成会话标题（默认关闭）
 

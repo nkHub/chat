@@ -317,6 +317,16 @@ export default function App() {
     let segMode: "text" | "thinking" | null = null;
     let segTimer: number | undefined;
 
+    // —— 过程计时（服务端 ts 优先，缺失回落浏览器打点）——
+    // runStartedAt/runEndedAt 是「整轮处理耗时」的起止：起点取首个事件、终点取 final 事件，
+    // 对应过程时间线折叠头部的「已处理完 6.0s」。
+    let runStartedAt = 0;
+    let runEndedAt = 0;
+    // 最近一条事件的 ts：思考流没有独立的结束事件，用它给思考段补结束时间。
+    let lastEventTs = 0;
+    // 当前思考流首个 token 的时刻，用于给新建的 thinking 段写开始时间。
+    let curThinkingStartedAt = 0;
+
     // 把当前正文增量并入段列表（append，语义与逐帧 flush 累加一致）：最后一个 text 段
     // 存在则追加，否则新建正文段。注意流式正文（含未闭合代码围栏原文）逐帧写回后由
     // 渲染层按围栏状态切分展示：围栏前正文走 markdown、开放围栏代码渐进展示，见 chat.tsx。
@@ -338,9 +348,16 @@ export default function App() {
       }
       if (curThinking) {
         const last = segments[segments.length - 1];
-        if (last?.type === "thinking") last.content += curThinking;
-        else segments.push({ type: "thinking", content: curThinking });
+        if (last?.type === "thinking") {
+          last.content += curThinking;
+          // 续跑恢复的旧段可能没有开始时间，这里补一次（有值不覆盖）
+          if (typeof last.startedAt !== "number") last.startedAt = curThinkingStartedAt || undefined;
+        } else {
+          segments.push({ type: "thinking", content: curThinking, startedAt: curThinkingStartedAt || undefined });
+        }
         curThinking = "";
+        // 本段已并入段列表，下一次思考重新打点开始时间
+        curThinkingStartedAt = 0;
       }
     };
 
@@ -366,6 +383,12 @@ export default function App() {
       }
       segMode = null;
       pushBuffers(true);
+      // 思考流的结束时刻：后端只在下一个边界（正文/工具/final）才体现「思考结束」，
+      // 因此最后一条 thinking 段的结束时间就取这个边界事件的 ts。已记录过的不覆盖。
+      const last = segments[segments.length - 1];
+      if (last?.type === "thinking" && typeof last.endedAt !== "number") {
+        last.endedAt = lastEventTs || Date.now();
+      }
     };
 
     try {
@@ -410,6 +433,10 @@ export default function App() {
         signal: controller.signal,
       })) {
         markUserSent();
+        // 所有服务端事件都带 ts（毫秒）。lastEventTs 是各类打点的统一来源：
+        // 整轮起点、思考步/工具步的起止时刻都以它为准；旧服务端没有 ts 时回落本机时钟。
+        lastEventTs = typeof event.data.ts === "number" ? event.data.ts : Date.now();
+        if (!runStartedAt) runStartedAt = lastEventTs;
         if (event.event === "model_delta") {
           if (event.data.content) {
             // 若此前在思考流，先把思考段封存，让正文另起一段。
@@ -423,6 +450,8 @@ export default function App() {
             // 若此前在正文流，先把正文段封存，让思考另起一段。
             if (segMode === "text") finalizeStream();
             segMode = "thinking";
+            // 思考流首个 token 的时刻：给新建的 thinking 段写开始时间
+            if (!curThinkingStartedAt) curThinkingStartedAt = lastEventTs || Date.now();
             curThinking += event.data.content;
             if (!segTimer) segTimer = window.setTimeout(() => writeSegments(), 40);
           }
@@ -442,7 +471,8 @@ export default function App() {
         } else if (event.event === "tool_call") {
           finalizeStream();
           const name = event.data.name || "工具";
-          segments.push({ type: "tool", name, params: event.data.arguments ?? {}, result: null, status: "running" });
+          // 工具步开始时刻：优先服务端 ts（真实发起时刻，不含网络往返）
+          segments.push({ type: "tool", name, params: event.data.arguments ?? {}, result: null, status: "running", startedAt: lastEventTs || Date.now() });
           updateAssistant({ segments: segments.slice(), streamStatus: `正在调用 ${name}…` });
         } else if (event.event === "tool_result") {
           finalizeStream();
@@ -453,6 +483,8 @@ export default function App() {
             if (segment.type === "tool") {
               segment.status = hasError ? "error" : "success";
               segment.result = event.data.error ?? event.data.result ?? null;
+              // 工具步结束时刻：与 tool_call 的开始时刻配对，时间线据此显示单步耗时
+              segment.endedAt = lastEventTs || Date.now();
               break;
             }
           }
@@ -473,7 +505,7 @@ export default function App() {
           // 把结果作为 tool 消息追加入工作消息续跑同一轮 Agent。
           finalizeStream();
           const toolName = event.data.name || "客户端工具";
-          segments.push({ type: "tool", name: toolName, params: event.data.arguments ?? {}, result: null, status: "running" });
+          segments.push({ type: "tool", name: toolName, params: event.data.arguments ?? {}, result: null, status: "running", startedAt: lastEventTs || Date.now() });
           updateAssistant({ segments: segments.slice(), streamStatus: `正在本地执行 ${toolName}…` });
           clientToolPending = {
             toolCallId: event.data.tool_call_id || "",
@@ -512,8 +544,17 @@ export default function App() {
           }
         } else if (event.event === "error") {
           throw new Error(event.data.error || "Agent 请求失败");
+        } else if (event.event === "custom" && event.data.name === "akm.layout") {
+          // AG-UI 布局：服务端已过 layout_schema 校验，这里只做一道形状守卫。
+          // 形状不对就当作没发生——正文 markdown 始终完整，界面不会因此空掉。
+          const layoutValue = event.data.value as { blocks?: unknown } | undefined;
+          if (layoutValue && typeof layoutValue === "object" && Array.isArray(layoutValue.blocks) && layoutValue.blocks.length > 0) {
+            updateAssistant({ layout: layoutValue as Message["layout"] });
+          }
         } else if (event.event === "final") {
           finalizeStream();
+          // 整轮结束时刻：优先用 final 事件的服务端 ts，缺失回落本机时钟。
+          runEndedAt = lastEventTs || Date.now();
           const finalMessage = event.data.final_message;
           const content = extractTextContent(finalMessage?.content);
           if (!content.trim()) throw new Error("Agent 返回了空消息");
@@ -545,15 +586,18 @@ export default function App() {
             [sessionId]: (prev[sessionId] ?? []).map(message => {
                if (message.id === userMessageId) return { ...message, status: "success" as const };
                if (message.id !== assistantMessageId) return message;
-               return {
-                 ...message,
-                 content,
+              return {
+                ...message,
+                content,
                 segments: segments.slice(),
                 time: nowTime(),
                 status: "success" as const,
                 streamStatus: undefined,
                 // final 事件携带本次运行自动压缩次数，>0 时在消息底部提示。
                 compacted: event.data.compacted,
+                // 过程时间线的整轮耗时：起点=首个事件、终点=final。
+                runStartedAt: runStartedAt || undefined,
+                runEndedAt: runEndedAt || lastEventTs || undefined,
               };
             }),
           }));
@@ -563,7 +607,15 @@ export default function App() {
 
       // 冲刷末尾残留的流式增量，避免内容丢失。
       finalizeStream();
-      if (segments.length) updateAssistant({ segments: segments.slice() });
+      if (segments.length) {
+        // 统一补记整轮耗时：正常结束走 final 分支写入 runEndedAt；中断/报错/提问等
+        // 半途收尾的路径在这里兜底，保证过程时间线始终能显示到「已处理完 X.Xs」。
+        updateAssistant({
+          segments: segments.slice(),
+          runStartedAt: runStartedAt || undefined,
+          runEndedAt: runEndedAt || lastEventTs || undefined,
+        });
+      }
 
       if (askPending) {
         // 交互澄清：保留已输出的内容，把回复标记为 asking（前端显示问题卡片等待回答）。
@@ -692,6 +744,26 @@ export default function App() {
 
   // 中断当前正在生成的回复：abort 流式请求，保留已输出内容并收尾。
   const stopReply = () => { activeRequestRef.current?.abort(); };
+
+  // 过程时间线的展开/收起：直接写回该消息的 processOpen 字段。
+  // 遍历所有会话而不只看当前会话，是因为列表渲染可能来自别的会话（side panel 场景），
+  // 用 messageId 全局唯一即可定位，避免「点了没反应」。
+  const toggleMessageProcess = (messageId: string, open: boolean) => {
+    setAllMessages(prev => {
+      let changed = false;
+      const next: Record<string, Message[]> = {};
+      for (const [key, list] of Object.entries(prev)) {
+        const updated = list.map(message => {
+          if (message.id !== messageId) return message;
+          changed = true;
+          return { ...message, processOpen: open };
+        });
+        next[key] = updated;
+      }
+      // 没有任何命中时保持原引用，避免无意义的整树重渲染
+      return changed ? next : prev;
+    });
+  };
 
   // 手动压缩当前会话上下文（/compact）：把较早的对话交由后端 LLM 归纳成摘要，
   // 用一条"摘要提示消息"替换早期消息，保留最近 COMPACT_KEEP_RECENT 条原始消息，
@@ -831,7 +903,7 @@ export default function App() {
     if (activePage === "automation") return <AutomationPage sidebarOpen={sidebarOpen} onToggle={() => setSidebarOpen(value => !value)} models={models} defaultModelKey={selectedModel?.key ?? ""} />;
     if (activePage === "workflow") return <WorkflowPage sidebarOpen={sidebarOpen} onToggle={() => setSidebarOpen(value => !value)} models={models} />;
     if (activePage === "assistant") return <AssistantPage sidebarOpen={sidebarOpen} onToggle={() => setSidebarOpen(value => !value)} assistants={assistants} onAdd={(name, prompt) => setAssistants(prev => [{ id: `custom-${Date.now()}`, name, description: prompt, prompt, icon: Bot, color: "bg-primary/10 text-primary" }, ...prev])} onEdit={(id, name, prompt) => setAssistants(prev => prev.map(assistant => assistant.id === id ? { ...assistant, name, ...(prompt ? { prompt, description: prompt } : {}) } : assistant))} onStart={assistantId => { const assistant = assistants.find(candidate => candidate.id === assistantId); const assistantName = assistant?.name ?? "助手"; const sessionId = `${assistantId}-${Date.now()}`; const message: Message = { id: `${assistantId}-message`, role: "user", content: `你好，请以「${assistantName}」的身份来帮我。`, time: nowTime(), status: "success" }; setSessions(prev => [{ id: sessionId, title: assistantName, time: nowTime(), ...(assistant?.prompt ? { instructions: assistant.prompt } : {}) }, ...prev]); setAllMessages(prev => ({ ...prev, [sessionId]: [message] })); setActiveSession(sessionId); setActivePage("chat"); }} onDelete={assistantId => setAssistants(prev => prev.filter(assistant => assistant.id !== assistantId))} />;
-    return <ChatPage session={activeSessionData} sessions={sessions} messages={messages} model={selectedModel} models={models} modelsLoading={modelsLoading} modelsError={modelsError} sidebarOpen={sidebarOpen} onToggleSidebar={() => setSidebarOpen(value => !value)} onModelChange={model => { setSelectedModel(model); if (activeSession) setSessions(prev => prev.map(session => session.id === activeSession ? { ...session, modelKey: model.key } : session)); }} onReloadModels={() => { void loadModels(); }}     onSend={(contentValue, attachments, tools, skillRef, sessionRefs) => sendMessage(contentValue, attachments, tools, skillRef, sessionRefs)} onNewSession={newSession} onRetry={retryMessage} onStop={stopReply} onAnswer={answerQuestion} onCompact={handleCompact} tools={activeSessionData?.tools ?? []} onToolsChange={tools => { if (!activeSession) return; setSessions(prev => prev.map(session => session.id === activeSession ? { ...session, tools } : session)); }} pendingGuide={pendingGuide} onCancelGuide={() => { pendingGuideRef.current = null; setPendingGuide(""); }} />;
+    return <ChatPage session={activeSessionData} sessions={sessions} messages={messages} model={selectedModel} models={models} modelsLoading={modelsLoading} modelsError={modelsError} sidebarOpen={sidebarOpen} onToggleSidebar={() => setSidebarOpen(value => !value)} onModelChange={model => { setSelectedModel(model); if (activeSession) setSessions(prev => prev.map(session => session.id === activeSession ? { ...session, modelKey: model.key } : session)); }} onReloadModels={() => { void loadModels(); }}     onSend={(contentValue, attachments, tools, skillRef, sessionRefs) => sendMessage(contentValue, attachments, tools, skillRef, sessionRefs)} onNewSession={newSession} onRetry={retryMessage} onStop={stopReply} onAnswer={answerQuestion} onCompact={handleCompact} onToggleProcess={toggleMessageProcess} messagesLoading={!stateLoaded} tools={activeSessionData?.tools ?? []} onToolsChange={tools => { if (!activeSession) return; setSessions(prev => prev.map(session => session.id === activeSession ? { ...session, tools } : session)); }} pendingGuide={pendingGuide} onCancelGuide={() => { pendingGuideRef.current = null; setPendingGuide(""); }} />;
   }, [activePage, activeSessionData, allMessages, messages, models, modelsLoading, modelsError, selectedModel, sidebarOpen, assistants, sessions, pendingGuide]);
 
   return (

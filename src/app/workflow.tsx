@@ -663,7 +663,7 @@ function WorkflowPage({ sidebarOpen, onToggle, models }: {
             <div className="flex items-center justify-center rounded-xl border border-dashed border-border bg-card/50 py-16 text-muted-foreground"><Loader2 size={18} className="mr-2 animate-spin" />加载中…</div>
           ) : (workflows ?? []).length === 0 ? (
             <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-border bg-card/50 px-6 py-16 text-center">
-              <WorkflowIcon size={28} className="mb-3 text-foreground/25" />
+              <WorkflowIcon size={28} className="mb-3 text-muted-foreground/70" />
               <p className="text-sm font-medium text-foreground/70">还没有工作流</p>
               <p className="mt-1 text-xs text-muted-foreground">点击「新建工作流」创建你的第一个自动化流程。</p>
             </div>
@@ -672,8 +672,8 @@ function WorkflowPage({ sidebarOpen, onToggle, models }: {
               {(workflows ?? []).map(workflow => (
                 <div key={workflow.id} className="group relative rounded-xl border bg-card p-4 shadow-sm transition-all hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-md">
                   <div className="absolute right-2.5 top-2.5 flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
-                    <button type="button" onClick={() => openEdit(workflow)} className="rounded p-1 text-foreground/25 hover:bg-black/[0.06] hover:text-foreground focus:outline-none dark:hover:bg-white/10" title="编辑工作流"><Pencil size={14} /></button>
-                    <button type="button" onClick={() => setDeleteTarget(workflow)} className="rounded p-1 text-foreground/25 hover:bg-black/[0.06] hover:text-red-500 focus:outline-none dark:hover:bg-white/10" title="删除工作流"><Trash2 size={14} /></button>
+                    <button type="button" onClick={() => openEdit(workflow)} className="rounded p-1 text-muted-foreground hover:bg-black/[0.06] hover:text-foreground focus:outline-none dark:hover:bg-white/10" title="编辑工作流"><Pencil size={14} /></button>
+                    <button type="button" onClick={() => setDeleteTarget(workflow)} className="rounded p-1 text-muted-foreground hover:bg-black/[0.06] hover:text-red-500 focus:outline-none dark:hover:bg-white/10" title="删除工作流"><Trash2 size={14} /></button>
                   </div>
                   <div className="pr-16">
                     <div className="flex items-center gap-2">
@@ -685,7 +685,7 @@ function WorkflowPage({ sidebarOpen, onToggle, models }: {
                   <div className="mt-3 flex flex-wrap items-center gap-1.5">
                     {workflow.nodes.map((node, index) => (
                       <Fragment key={node.id}>
-                        {index > 0 && <ArrowRight size={12} className="shrink-0 text-muted-foreground/50" />}
+                        {index > 0 && <ArrowRight size={12} className="shrink-0 text-muted-foreground" />}
                         <span className="inline-flex items-center gap-1 rounded-md border bg-background px-1.5 py-0.5 text-xs text-foreground/80">
                           <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: NODE_META[node.type].color }} />
                           {node.data.label || NODE_META[node.type].label}

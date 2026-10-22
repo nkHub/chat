@@ -79,8 +79,8 @@ function AssistantPage({ sidebarOpen, onToggle, onStart, assistants, onAdd, onEd
               return (
                 <div key={id} className="group relative flex flex-col rounded-xl border bg-card p-4 shadow-sm transition-all hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-md">
                   <div className="absolute right-2 top-2 flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
-                    <button type="button" onClick={event => { event.stopPropagation(); openEdit(assistant); }} className="rounded p-1 text-foreground/25 hover:bg-black/[0.06] hover:text-foreground focus:outline-none dark:hover:bg-white/10" title="编辑助手"><Pencil size={14} /></button>
-                    <button type="button" onClick={event => { event.stopPropagation(); setDeleteTarget(assistant); }} className="rounded p-1 text-foreground/25 hover:bg-black/[0.06] hover:text-red-500 focus:outline-none dark:hover:bg-white/10" title="删除助手"><Trash2 size={14} /></button>
+                    <button type="button" onClick={event => { event.stopPropagation(); openEdit(assistant); }} className="rounded p-1 text-muted-foreground hover:bg-black/[0.06] hover:text-foreground focus:outline-none dark:hover:bg-white/10" title="编辑助手"><Pencil size={14} /></button>
+                    <button type="button" onClick={event => { event.stopPropagation(); setDeleteTarget(assistant); }} className="rounded p-1 text-muted-foreground hover:bg-black/[0.06] hover:text-red-500 focus:outline-none dark:hover:bg-white/10" title="删除助手"><Trash2 size={14} /></button>
                   </div>
                   <button type="button" onClick={() => onStart(id)} className="flex w-full flex-1 flex-col text-left">
                     <div className="mb-3 flex items-center gap-2">

@@ -1,3 +1,5 @@
+// AG-UI 布局协议（从设计项目移植，见 components/agui/index.ts）
+import type { AGUILayout } from "@/components/agui";
 import type { AgentMessage, ContextWarning } from "@/lib/agent-api";
 import type { LucideIcon } from "lucide-react";
 
@@ -33,10 +35,21 @@ type FunctionCall = {
 // 各段按序叠加展示（正文→思考→工具调用→下一段正文…），避免多轮正文互相覆盖。
 // 注：流式进行中的 text 段 content 可能含有尚未闭合的代码围栏原文（正文全量累积），
 // 渲染层按围栏状态切分：围栏前正文走 markdown、开放围栏代码走渐进式展示（见 chat.tsx）。
+// 注 2：thinking / tool 段可带 startedAt / endedAt（毫秒时间戳），来源优先取服务端
+// 事件的 ts 字段（真实执行时刻，不含网络抖动），缺失时由 App.tsx 用浏览器打点兜底。
+// 过程时间线（lib/process-groups.ts）据此计算每步与整轮耗时；字段缺失不报错，只是不显示时长。
 type MessageSegment =
   | { type: "text"; content: string }
-  | { type: "thinking"; content: string }
-  | { type: "tool"; name: string; params: Record<string, unknown>; result: unknown; status: "running" | "success" | "error" };
+  | { type: "thinking"; content: string; startedAt?: number; endedAt?: number }
+  | {
+      type: "tool";
+      name: string;
+      params: Record<string, unknown>;
+      result: unknown;
+      status: "running" | "success" | "error";
+      startedAt?: number;
+      endedAt?: number;
+    };
 
 // 消息携带附件的元数据（仅存名称/类型/大小，不保存文件内容，随会话持久化）。
 // previewUrl 为图片的临时 Blob URL，仅在当前页面会话内有效，持久化时会被剔除。
@@ -54,6 +67,18 @@ type Message = {
   citations?: Citation[];
   functionCalls?: FunctionCall[];
   segments?: MessageSegment[];
+  // 本轮处理耗时（毫秒）：runStartedAt=首个事件到达时刻（服务端 ts 优先），
+  // runEndedAt=final 事件时刻。过程时间线的折叠头部「已处理完 X.Xs」用它，
+  // 比组内首末步跨度更接近用户感知的整轮耗时（含最后一次模型输出）。
+  runStartedAt?: number;
+  runEndedAt?: number;
+  // 过程时间线的折叠状态：true=展开看步骤、false=收起只看标题行。
+  // 用户手动切换后写入消息并随会话持久化（IndexedDB 整体存 StoredChatState）。
+  processOpen?: boolean;
+  // 结构化布局（AG-UI）：由服务端 `custom` 事件下发，已在服务端过 layout_schema 校验。
+  // 它只是**增强层**——content 始终是完整 markdown；布局缺失/校验失败/版本不认，
+  // 甚至整个前端回退到旧版本，都会按 content 正常渲染（见「兼容约定」条目）。
+  layout?: AGUILayout;
   files?: AttachmentMeta[];
   // 上下文管理信息：contextWarning 为占用告警（后端 context_warning 事件），
   // compacted 为本次回复运行期间自动压缩上下文的次数（final 事件携带）。

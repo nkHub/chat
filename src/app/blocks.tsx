@@ -1,5 +1,5 @@
-import { useContext, useEffect, useRef, useState } from "react";
-import { AlertCircle, Check, ChevronRight, Copy, ExternalLink, HelpCircle, Loader2, RotateCcw, Share2, ThumbsDown, ThumbsUp, Wrench } from "lucide-react";
+import { useContext, useEffect, useRef, useState, type ReactNode } from "react";
+import { AlertCircle, Check, ChevronRight, Copy, ExternalLink, HelpCircle, Loader2, RotateCcw, Wrench } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
@@ -64,7 +64,7 @@ function CitationsBlock({ citations }: { citations: Citation[] }) {
           <button key={citation.index} type="button" className="inline-flex min-w-0 items-center gap-1 rounded-md border border-border bg-muted/50 px-2 py-1 text-left text-xs text-muted-foreground transition-colors hover:border-primary/30 hover:text-primary">
             <span className="font-semibold text-primary">[{citation.index}]</span>
             <span className="truncate">{citation.title}</span>
-            <span className="text-foreground/30">{citation.domain}</span>
+            <span className="text-muted-foreground">{citation.domain}</span>
           </button>
         ))}
       </div>
@@ -72,7 +72,7 @@ function CitationsBlock({ citations }: { citations: Citation[] }) {
   );
 }
 
-function MessageActions({ text }: { text: string }) {
+function MessageActions({ text, children }: { text: string; children?: ReactNode }) {
   const [copied, setCopied] = useState(false);
   const copy = () => {
     navigator.clipboard.writeText(text).catch(() => undefined);
@@ -80,11 +80,10 @@ function MessageActions({ text }: { text: string }) {
     window.setTimeout(() => setCopied(false), 1400);
   };
   return (
+    // 只保留「复制」：点赞/点踩/分享目前没有承接方（无反馈上报、无分享链路），先不占位置
     <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover/msg:opacity-100">
-      <Tooltip><TooltipTrigger asChild><button type="button" className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground" onClick={copy}>{copied ? <Check size={12} /> : <Copy size={12} />}</button></TooltipTrigger><TooltipContent>复制</TooltipContent></Tooltip>
-      <Tooltip><TooltipTrigger asChild><button type="button" className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"><ThumbsUp size={12} /></button></TooltipTrigger><TooltipContent>有帮助</TooltipContent></Tooltip>
-      <Tooltip><TooltipTrigger asChild><button type="button" className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"><ThumbsDown size={12} /></button></TooltipTrigger><TooltipContent>没帮助</TooltipContent></Tooltip>
-      <Tooltip><TooltipTrigger asChild><button type="button" className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"><Share2 size={12} /></button></TooltipTrigger><TooltipContent>分享</TooltipContent></Tooltip>
+      <Tooltip><TooltipTrigger asChild><button type="button" className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground" onClick={copy} aria-label="复制回复">{copied ? <Check size={12} /> : <Copy size={12} />}</button></TooltipTrigger><TooltipContent>复制</TooltipContent></Tooltip>
+      {children}
     </div>
   );
 }
@@ -148,7 +147,7 @@ function AskUserCard({ question, options, multiple, active, onSubmit }: {
   };
 
   return (
-    <div className="mt-3 rounded-xl border border-primary/25 bg-primary/[0.04] px-3.5 py-3">
+    <div className="mt-3 rounded-xl border border-primary/25 bg-primary/[0.06] px-3.5 py-3 dark:bg-primary/10">
       <div className="flex items-start gap-2">
         <HelpCircle size={15} className="mt-0.5 shrink-0 text-primary" />
         <div className="min-w-0 flex-1">

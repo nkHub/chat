@@ -94,7 +94,7 @@ function Sidebar({
         <div className={cn("flex h-full w-[240px] flex-col transition-opacity duration-150", open ? "opacity-100" : "opacity-0")}>
           <div className="flex items-center gap-2.5 border-b border-black/[0.06] px-4 py-[15px]">
             <Avatar className="h-7 w-7 rounded-md"><AvatarFallback className="rounded-md bg-primary text-primary-foreground"><Bot size={14} /></AvatarFallback></Avatar>
-            <span className="text-sm font-semibold tracking-tight text-foreground">AetherAI</span>
+            <span className="text-sm font-semibold tracking-tight text-foreground">AKM AI Chat</span>
             <button type="button" aria-label="收起侧栏" className="ml-auto rounded p-1 text-foreground/40 hover:bg-black/[0.06] hover:text-foreground dark:hover:bg-white/10 md:hidden" onClick={onClose}><PanelLeftClose size={14} /></button>
           </div>
           <div className="space-y-0.5 px-2 pb-1 pt-3">
@@ -106,7 +106,7 @@ function Sidebar({
             ))}
           </div>
           <ScrollArea className="min-h-0 flex-1 px-2">
-            <p className="px-2.5 py-1.5 text-sm font-semibold uppercase tracking-widest text-foreground/30">最近对话</p>
+            <p className="px-2.5 py-1.5 text-sm font-semibold uppercase tracking-widest text-muted-foreground/90">最近对话</p>
             {sessions.map(session => (
               <ContextMenu key={session.id}>
                 <ContextMenuTrigger asChild>
@@ -126,10 +126,10 @@ function Sidebar({
                     }}
                     onDragEnd={() => { setDragId(null); setOverId(null); }}
                     onClick={() => onSessionChange(session.id)}
-                    className={cn("mb-0.5 flex w-full cursor-pointer select-none items-center gap-1 rounded-md px-2.5 py-2 text-left transition-colors", dragId === session.id && "opacity-40", overId === session.id && "outline-2 outline-dashed outline-primary", session.id === activeSession ? "bg-primary/10 text-primary" : "text-foreground/55 hover:bg-black/[0.05] hover:text-foreground/80 dark:hover:bg-white/10 dark:hover:text-foreground")}
+                    className={cn("mb-0.5 flex w-full cursor-pointer select-none items-center gap-1 rounded-md px-2.5 py-2 text-left transition-colors", dragId === session.id && "opacity-40", overId === session.id && "outline-2 outline-dashed outline-primary", session.id === activeSession ? "bg-primary/10 text-primary" : "text-foreground/75 hover:bg-black/[0.05] hover:text-foreground dark:text-foreground/85 dark:hover:bg-white/10 dark:hover:text-foreground")}
                   >
                     <span className="min-w-0 flex-1 truncate text-sm leading-snug">{session.title}</span>
-                    <span className="shrink-0 whitespace-nowrap text-xs text-foreground/30">{formatRelativeTime(session.time, now)}</span>
+                    <span className="shrink-0 whitespace-nowrap text-xs text-muted-foreground">{formatRelativeTime(session.time, now)}</span>
                   </div>
                 </ContextMenuTrigger>
                 <ContextMenuContent className="w-44">

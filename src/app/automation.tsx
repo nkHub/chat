@@ -217,11 +217,11 @@ function AutomationPage({ sidebarOpen, onToggle, models, defaultModelKey }: { si
                     </div>
                     {/* 悬浮操作：立即运行 / 编辑 / 删除 */}
                     <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
-                      <button type="button" onClick={() => runNow(task)} disabled={busy} title="立即运行" className="rounded p-1 text-foreground/25 hover:bg-black/[0.06] hover:text-primary focus:outline-none disabled:opacity-50 dark:hover:bg-white/10">
+                      <button type="button" onClick={() => runNow(task)} disabled={busy} title="立即运行" className="rounded p-1 text-muted-foreground hover:bg-black/[0.06] hover:text-primary focus:outline-none disabled:opacity-50 dark:hover:bg-white/10">
                         {busy ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
                       </button>
-                      <button type="button" onClick={() => openEdit(task)} title="编辑" className="rounded p-1 text-foreground/25 hover:bg-black/[0.06] hover:text-foreground focus:outline-none dark:hover:bg-white/10"><Pencil size={14} /></button>
-                      <button type="button" onClick={() => setDeleteTarget(task)} title="删除" className="rounded p-1 text-foreground/25 hover:bg-black/[0.06] hover:text-red-500 focus:outline-none dark:hover:bg-white/10"><Trash2 size={14} /></button>
+                      <button type="button" onClick={() => openEdit(task)} title="编辑" className="rounded p-1 text-muted-foreground hover:bg-black/[0.06] hover:text-foreground focus:outline-none dark:hover:bg-white/10"><Pencil size={14} /></button>
+                      <button type="button" onClick={() => setDeleteTarget(task)} title="删除" className="rounded p-1 text-muted-foreground hover:bg-black/[0.06] hover:text-red-500 focus:outline-none dark:hover:bg-white/10"><Trash2 size={14} /></button>
                     </div>
                   </div>
                   <p className="mb-2 line-clamp-2 text-xs leading-relaxed text-muted-foreground">{describeTask(task)}</p>
