@@ -580,8 +580,11 @@ function RenderKanban({ block }: { block: KanbanBlock }) {
                       </span>
                     )}
                     <p className="text-xs font-medium text-foreground leading-snug">{card.title}</p>
+                    {/* min-h-[2lh]：描述默认至少占两行高度（lh 跟随自身 line-height，
+                        字号/行高变化时自动适配）。同列卡片描述长短不一时高度才齐，
+                        只有一行描述的卡片不会比别人矮一截 */}
                     {card.description && (
-                      <p className="text-[11px] text-muted-foreground leading-relaxed">{card.description}</p>
+                      <p className="text-[11px] text-muted-foreground leading-relaxed min-h-[2lh]">{card.description}</p>
                     )}
                     {card.tags && card.tags.length > 0 && (
                       <div className="flex flex-wrap gap-1">
