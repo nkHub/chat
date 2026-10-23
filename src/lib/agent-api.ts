@@ -1179,7 +1179,9 @@ function createAgentFormData(options: {
 }
 
 export async function fetchModels(): Promise<ApiModel[]> {
-  const payload = await requestJson<{ data?: ApiModel[] }>("/v1/models");
+  // capability=chat：只要可对话模型，过滤掉图像生成 / embedding / 重排模型。
+  // 后端不传该参数时返回全量（插件配置页需要选 embedding 模型）。
+  const payload = await requestJson<{ data?: ApiModel[] }>("/v1/models?capability=chat");
   if (!Array.isArray(payload?.data)) throw new Error("模型列表格式无效");
   return payload.data.filter(model => typeof model?.id === "string" && model.id.trim());
 }

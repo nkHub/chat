@@ -18,41 +18,6 @@ export type AGUIIntent =
 
 // ─── Block types ─────────────────────────────────────────────────────────────
 
-export type TextBlock = {
-  type: "text";
-  content: string;
-  size?: "sm" | "base" | "lg";
-  muted?: boolean;
-};
-
-export type HeadingBlock = {
-  type: "heading";
-  content: string;
-  rank: 1 | 2 | 3;
-};
-
-export type CodeBlock = {
-  type: "code";
-  code: string;
-  lang: string;
-  title?: string;
-  highlight?: number[];
-};
-
-export type TableColumn = {
-  key: string;
-  label: string;
-  align?: "left" | "center" | "right";
-  mono?: boolean;
-  badge?: boolean;
-};
-
-export type TableBlock = {
-  type: "table";
-  columns: TableColumn[];
-  rows: Record<string, string | number>[];
-  caption?: string;
-};
 
 export type StatItem = {
   label: string;
@@ -108,16 +73,59 @@ export type TimelineBlock = {
   events: TimelineEvent[];
 };
 
-export type ListItem = {
-  content: string;
-  done?: boolean;
-  sub?: string[];
+/** 流程节点类型：决定方框的语义色与形状（start/end 更重，decision 用琥珀色） */
+export type FlowNodeKind = "step" | "start" | "end" | "decision" | "async";
+
+export type FlowNode = {
+  id: string;
+  label: string;
+  sublabel?: string | null;
+  kind: FlowNodeKind;
 };
 
-export type ListBlock = {
-  type: "list";
-  style: "bullet" | "numbered" | "check";
-  items: ListItem[];
+/** 连线类型：main 实线、branch 虚线分叉、async 点线、return 反向虚线 */
+export type FlowEdgeKind = "main" | "branch" | "async" | "return";
+
+export type FlowEdge = {
+  from: string;
+  to: string;
+  label?: string | null;
+  kind: FlowEdgeKind;
+};
+
+/**
+ * 流程图块：nodes 是方框，edges 是带方向的连线。
+ * 服务端已保证 nodes ≥ 2、edges 的 from/to 一定命中存在的 id
+ * （见 layout_schema._normalize_flow_block），前端只负责布局与绘制。
+ */
+/** 分组（泳道）配色：与卡片其它块共用同一套语义色 */
+export type FlowGroupColor = "default" | "blue" | "green" | "amber" | "violet" | "red";
+
+/**
+ * 分组/泳道：把若干节点圈进一个框（对应 archify 的 01 / 02 / EX 泳道）。
+ * 服务端已保证 `nodes` 都是存在的节点 id，且一个节点只归属第一个匹配的组。
+ */
+export type FlowGroup = {
+  label: string;
+  color: FlowGroupColor;
+  nodes: string[];
+};
+
+export type FlowBlock = {
+  type: "flow";
+  direction: "LR" | "TB";
+  nodes: FlowNode[];
+  /**
+   * 以下四个字段在**新**数据里由服务端归一化保证齐全，但浏览器 IndexedDB 里的
+   * 历史会话不会随协议升级重写，旧 flow 可能完全没有这些键。
+   * 所以类型上标可选，由 `normalizeFlowBlock()` 在渲染前补齐（见 flow-diagram.tsx）。
+   */
+  edges?: FlowEdge[];
+  /** 可选分区（最多 4 组）；缺失/空数组表示不画框 */
+  groups?: FlowGroup[];
+  /** 是否在底部显示按 kind 统计的图例 */
+  legend?: boolean;
+  caption?: string | null;
 };
 
 export type SeparatorBlock = {
@@ -182,16 +190,12 @@ export type MapBlock = {
 };
 
 export type AGUIBlock =
-  | TextBlock
-  | HeadingBlock
-  | CodeBlock
-  | TableBlock
   | StatsBlock
   | CardsBlock
   | AlertBlock
   | ComparisonBlock
   | TimelineBlock
-  | ListBlock
+  | FlowBlock
   | SeparatorBlock
   | ChartBlock
   | ProgressBlock

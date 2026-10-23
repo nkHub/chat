@@ -36,3 +36,54 @@
   0%, 100% { opacity: 1; }
   50% { opacity: 0; }
 }
+
+/* flow 流程图块的动效（对标 archify 的 Live motion）：
+
+   ① 主链边先「画」一遍：path 上写 pathLength=1 做长度归一化，这里用 dasharray:1 +
+      dashoffset 1→0 描边；画完 opacity 归 0 自己消失，露出下面带箭头的标准线，
+      所以 branch / async / return 的虚线语义不受影响。
+   ② 边与节点按层依次淡入，延迟由组件内联 style 给出（步长 180ms）。
+   ③ **常驻流动**：主链上再叠一条「流动光点」，无限循环沿路径跑。
+      为什么必须有这个：① 的描边动画只在挂载瞬间播一次（不到 1 秒就结束），
+      用户滚动到卡片时早已播完，看起来就是一张静止图。常驻流动才能让人
+      「一眼看出这是有方向的流程」，也才符合用户说的「连接线的动画没加上」。
+   ④ prefers-reduced-motion 下全部静止：trace 与流动光点都不显示。 */
+@keyframes akm-flow-trace {
+  from { stroke-dashoffset: 1; opacity: 0.95; }
+  to { stroke-dashoffset: 0; opacity: 0; }
+}
+
+@keyframes akm-flow-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes akm-flow-node-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* 流动光点：一小段高亮短线沿路径持续前进（dashoffset 从 1 走到 0 = 走完全程）。
+   dasharray 里「2.5 97.5」表示亮段占 2.5%、其余透明——用 pathLength=1 归一化后
+   无论路径多长，亮段长度看起来都差不多。 */
+@keyframes akm-flow-pulse {
+  from { stroke-dashoffset: 1; }
+  to { stroke-dashoffset: 0; }
+}
+
+.akm-flow-trace {
+  stroke-dasharray: 1;
+  animation: akm-flow-trace 480ms ease-out both;
+}
+
+/* 常驻流动层：无限循环，delay 由组件按层给，形成「一路往前推」的观感 */
+.akm-flow-pulse {
+  stroke-dasharray: 2.5 97.5;
+  animation: akm-flow-pulse 3.2s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .akm-flow-anim { animation: none !important; }
+  .akm-flow-trace { display: none; }
+  .akm-flow-pulse { display: none; }
+}

@@ -2,7 +2,7 @@ import { useState } from "react";
 import { cn } from "@/lib/utils";
 import {
   CheckCircle2, XCircle, AlertTriangle, Info, TrendingUp, TrendingDown,
-  Minus, Copy, Check, ChevronDown, ChevronRight, Circle,
+  Minus, Check, ChevronDown, ChevronRight,
 } from "lucide-react";
 import {
   ResponsiveContainer, BarChart, Bar, LineChart, Line, AreaChart, Area,
@@ -11,135 +11,13 @@ import {
 } from "recharts";
 import type {
   AGUILayout, AGUIBlock,
-  TextBlock, HeadingBlock, CodeBlock, TableBlock,
   StatsBlock, CardsBlock, AlertBlock, ComparisonBlock,
-  TimelineBlock, ListBlock, SeparatorBlock,
+  TimelineBlock, FlowBlock, SeparatorBlock,
   StatItem, CardItem,
   ChartBlock, ProgressBlock, KanbanBlock, MapBlock,
 } from "./types";
+import { FlowDiagram } from "./flow-diagram";
 
-// ─── Text block ───────────────────────────────────────────────────────────────
-
-function RenderText({ block }: { block: TextBlock }) {
-  const sizeClass = block.size === "sm" ? "text-sm" : block.size === "lg" ? "text-base font-medium" : "text-sm";
-  return (
-    <p className={cn("leading-relaxed", sizeClass, block.muted ? "text-muted-foreground" : "text-foreground")}>
-      {block.content}
-    </p>
-  );
-}
-
-// ─── Heading block ────────────────────────────────────────────────────────────
-
-function RenderHeading({ block }: { block: HeadingBlock }) {
-  const cls = {
-    1: "text-lg font-semibold text-foreground tracking-tight",
-    2: "text-base font-semibold text-foreground",
-    3: "text-sm font-semibold text-foreground uppercase tracking-widest",
-  }[block.rank];
-  return <div className={cls}>{block.content}</div>;
-}
-
-// ─── Code block ───────────────────────────────────────────────────────────────
-
-function RenderCode({ block }: { block: CodeBlock }) {
-  const [copied, setCopied] = useState(false);
-  const copy = () => {
-    navigator.clipboard.writeText(block.code);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
-  };
-  return (
-    <div className="rounded-lg border border-border overflow-hidden text-sm font-mono">
-      <div className="flex items-center justify-between px-3 py-1.5 bg-muted/60 border-b border-border">
-        <span className="text-xs text-muted-foreground font-sans">
-          {block.title ?? block.lang}
-        </span>
-        <button
-          onClick={copy}
-          className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
-        >
-          {copied ? <Check size={12} /> : <Copy size={12} />}
-          {copied ? "已复制" : "复制"}
-        </button>
-      </div>
-      <pre className="p-3 overflow-x-auto bg-[#f8f9fa] dark:bg-[#1a1b1e] leading-relaxed">
-        <code className="text-[13px]">{block.code}</code>
-      </pre>
-    </div>
-  );
-}
-
-// ─── Table block ──────────────────────────────────────────────────────────────
-
-const BADGE_COLORS: Record<string, string> = {
-  done: "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300",
-  success: "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300",
-  error: "bg-red-100 text-red-700 dark:bg-red-500/15 dark:text-red-300",
-  failed: "bg-red-100 text-red-700 dark:bg-red-500/15 dark:text-red-300",
-  pending: "bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300",
-  warning: "bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300",
-  running: "bg-blue-100 text-blue-700 dark:bg-blue-500/15 dark:text-blue-300",
-  active: "bg-blue-100 text-blue-700 dark:bg-blue-500/15 dark:text-blue-300",
-};
-
-function cellBadge(val: string) {
-  const lower = val.toLowerCase();
-  const cls = BADGE_COLORS[lower] ?? "bg-muted text-muted-foreground";
-  return <span className={cn("inline-flex px-1.5 py-0.5 rounded text-xs font-medium", cls)}>{val}</span>;
-}
-
-function RenderTable({ block }: { block: TableBlock }) {
-  return (
-    <div className="rounded-lg border border-border overflow-hidden">
-      {block.caption && (
-        <div className="px-3 py-1.5 bg-muted/40 border-b border-border text-xs text-muted-foreground font-medium">
-          {block.caption}
-        </div>
-      )}
-      <div className="overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="bg-muted/30">
-              {block.columns.map((col) => (
-                <th
-                  key={col.key}
-                  className={cn(
-                    "px-3 py-2 text-xs font-semibold text-muted-foreground border-b border-border",
-                    col.align === "right" ? "text-right" : col.align === "center" ? "text-center" : "text-left"
-                  )}
-                >
-                  {col.label}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {block.rows.map((row, i) => (
-              <tr key={i} className="border-b border-border/50 last:border-0 hover:bg-muted/20 transition-colors">
-                {block.columns.map((col) => {
-                  const val = String(row[col.key] ?? "—");
-                  return (
-                    <td
-                      key={col.key}
-                      className={cn(
-                        "px-3 py-2 text-foreground",
-                        col.align === "right" ? "text-right" : col.align === "center" ? "text-center" : "text-left",
-                        col.mono ? "font-mono text-xs" : ""
-                      )}
-                    >
-                      {col.badge ? cellBadge(val) : val}
-                    </td>
-                  );
-                })}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
 
 // ─── Stats block ──────────────────────────────────────────────────────────────
 
@@ -334,42 +212,6 @@ function RenderTimeline({ block }: { block: TimelineBlock }) {
   );
 }
 
-// ─── List block ───────────────────────────────────────────────────────────────
-
-function RenderList({ block }: { block: ListBlock }) {
-  return (
-    <ul className="flex flex-col gap-1">
-      {block.items.map((item, i) => (
-        <li key={i} className="flex gap-2 text-sm">
-          <span className="shrink-0 mt-0.5">
-            {block.style === "check"
-              ? item.done
-                ? <CheckCircle2 size={14} className="text-emerald-500 mt-0.5" />
-                : <Circle size={14} className="text-muted-foreground/40 mt-0.5" />
-              : block.style === "numbered"
-              ? <span className="text-muted-foreground font-mono text-xs w-4 text-right mt-0.5">{i + 1}.</span>
-              : <span className="text-muted-foreground mt-1.5 block w-1 h-1 rounded-full bg-current" />}
-          </span>
-          <div>
-            <span className={cn("leading-relaxed", item.done && block.style === "check" ? "line-through text-muted-foreground" : "text-foreground")}>
-              {item.content}
-            </span>
-            {item.sub && item.sub.length > 0 && (
-              <ul className="mt-1 flex flex-col gap-0.5 pl-3">
-                {item.sub.map((s, j) => (
-                  <li key={j} className="text-xs text-muted-foreground flex gap-1.5">
-                    <span className="mt-1.5 block w-1 h-1 rounded-full bg-muted-foreground/40 shrink-0" />
-                    {s}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        </li>
-      ))}
-    </ul>
-  );
-}
 
 // ─── Separator block ──────────────────────────────────────────────────────────
 
@@ -776,16 +618,12 @@ function RenderMap({ block }: { block: MapBlock }) {
 
 function RenderBlock({ block }: { block: AGUIBlock }) {
   switch (block.type) {
-    case "text":       return <RenderText block={block} />;
-    case "heading":    return <RenderHeading block={block} />;
-    case "code":       return <RenderCode block={block} />;
-    case "table":      return <RenderTable block={block} />;
     case "stats":      return <RenderStats block={block} />;
     case "cards":      return <RenderCards block={block} />;
     case "alert":      return <RenderAlert block={block} />;
     case "comparison": return <RenderComparison block={block} />;
     case "timeline":   return <RenderTimeline block={block} />;
-    case "list":       return <RenderList block={block} />;
+    case "flow":       return <FlowDiagram block={block} />;
     case "separator":  return <RenderSeparator block={block} />;
     case "chart":      return <RenderChart block={block} />;
     case "progress":   return <RenderProgress block={block} />;
