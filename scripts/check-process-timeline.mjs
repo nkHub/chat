@@ -127,6 +127,9 @@ check("已知工具翻译", describeStep("akm_read_file").action === "阅读文�
 check("未知工具回落工具名（去掉 akm_ 前缀）", describeStep("akm_not_registered_yet").action === "not_registered_yet");
 check("空工具名回落占位文案", describeStep("").action === "工具调用");
 check("语气字段参与图标选择", describeStep("tavily_search").tone === "net");
+// 网页抓取工具必须显式收录：漏了就会走「去掉 akm_ 前缀」的降级路径，时间线里裸露成 fetch_url
+check("网页抓取工具显示中文", describeStep("akm_fetch_url").action === "读取网页");
+check("网页抓取工具语气为联网", describeStep("akm_fetch_url").tone === "net");
 
 // ---- 文案：参数摘要 ----
 check("参数优先取 path", describeStepTarget({ path: "/tmp/a.md", query: "x" }) === "/tmp/a.md");
