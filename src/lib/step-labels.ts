@@ -42,7 +42,8 @@ const TOOL_LABELS: Record<string, StepLabel> = {
   akm_edit_file: { action: "编辑文件", tone: "write" },
   akm_make_dir: { action: "新建目录", tone: "write" },
   akm_delete_file: { action: "删除文件", tone: "write" },
-  akm_xlsx: { action: "处理表格", tone: "write" },
+  akm_move_file: { action: "移动文件", tone: "write" },
+  akm_copy_file: { action: "复制文件", tone: "write" },
   // ── 命令与版本控制 ──
   akm_run_shell: { action: "执行命令", tone: "system" },
   akm_run_git: { action: "Git 操作", tone: "system" },
@@ -183,6 +184,32 @@ function firstMeaningfulLine(text: string): string {
   return "";
 }
 
+/** read 结果的头部：`[相对路径#A1B2]`（纯文本形态，不是 JSON）。 */
+const READ_RESULT_HEADER = /^\[[^\]\n]+#[0-9A-Fa-f]{4}\]$/;
+/** read 内容行前缀：`41: def main():`。 */
+const READ_RESULT_LINE_PREFIX = /^\d+:\s?/;
+/** read 的 footer：`（显示第 41-42 行…）` / `（已读到文件结尾…）`。 */
+const READ_RESULT_FOOTER = /^（/;
+
+/**
+ * 从纯文本工具结果里取一句摘要。
+ *
+ * `akm_read_file` 自 v0.1.58 起返回「`[路径#TAG]` 头 + `N: 内容` 行 + footer」的纯文本，
+ * 直接取第一行会显示成 `[src/main.py#A1B2]`（tag 而非内容），信息量为零。
+ * 这里跳过头部 / 行号前缀 / footer，取第一条真正的内容行。
+ */
+function summarizePlainTextResult(text: string): string {
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (READ_RESULT_HEADER.test(line)) continue;
+    if (READ_RESULT_FOOTER.test(line)) continue;
+    const stripped = line.replace(READ_RESULT_LINE_PREFIX, "").trim();
+    if (stripped) return toShortText(stripped, MAX_SUMMARY_CHARS);
+  }
+  return toShortText(firstMeaningfulLine(text), MAX_SUMMARY_CHARS);
+}
+
 /**
  * 把工具结果压成一句结论。优先级：
  * 1. 结构化错误（`{error}` / `ok: false`）→ 「失败：原因」，这类信息最需要被看见；
@@ -197,15 +224,16 @@ export function summarizeStepResult(result: unknown): string {
   if (typeof result === "string") {
     const trimmed = result.trim();
     if (!trimmed) return "";
-    // 工具结果大多是 JSON 字符串，先尝试解析以提取结构化信息
+    // 工具结果大多是 JSON 字符串，先尝试解析以提取结构化信息；
+    // 解析失败说明是纯文本结果（如 akm_read_file 的行号窗口），走纯文本摘要。
     if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
       try {
         payload = JSON.parse(trimmed);
       } catch {
-        return toShortText(firstMeaningfulLine(trimmed), MAX_SUMMARY_CHARS);
+        return summarizePlainTextResult(trimmed);
       }
     } else {
-      return toShortText(firstMeaningfulLine(trimmed), MAX_SUMMARY_CHARS);
+      return summarizePlainTextResult(trimmed);
     }
   }
 

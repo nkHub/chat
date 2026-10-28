@@ -719,13 +719,16 @@ const AKM_READ_FILE_TOOL: AgentTool = {
   type: "function",
   function: {
     name: "akm_read_file",
-    description: "读取工作区内文本文件的内容（带行级分页与长度限制）。仅能访问 agent_workspace_root 配置的工作区目录",
+    description:
+      "读取工作区内文本文件，返回带绝对行号的纯文本窗口与 4 位版本 tag（首行形如 [路径#TAG]）。" +
+      "offset 为 1-based 起始行（与 akm_edit_file 的 start_line 一致），limit 默认 2000 行、上限 4000；" +
+      "窗口未读完时末尾会给出下一次的 offset。仅能访问 agent_workspace_root 配置的工作区目录",
     parameters: {
       type: "object",
       properties: {
         path: { type: "string", description: "工作区内的文件路径（绝对路径或相对工作区根目录的路径）" },
-        offset: { type: "integer", description: "起始行号（从 0 开始），默认 0" },
-        limit: { type: "integer", description: "返回的最大行数，-1 表示读到结尾，默认 -1" },
+        offset: { type: "integer", description: "起始行号（1-based），默认 1" },
+        limit: { type: "integer", description: "返回的最大行数，默认 2000，上限 4000；-1 表示尽量读到结尾" },
       },
       required: ["path"],
     },
@@ -736,11 +739,15 @@ const AKM_LIST_DIR_TOOL: AgentTool = {
   type: "function",
   function: {
     name: "akm_list_dir",
-    description: "列出工作区内目录下的条目（名称、类型、大小），用于感知工作区结构",
+    description:
+      "列出工作区内目录下的条目（名称、类型、大小、是否敏感），支持 offset/limit 分页" +
+      "（默认 500 条、上限 2000），被截断时返回 truncated 与 next_offset",
     parameters: {
       type: "object",
       properties: {
         path: { type: "string", description: "工作区内的目录路径，留空表示工作区根目录" },
+        offset: { type: "integer", description: "分页起始序号（0-based），默认 0" },
+        limit: { type: "integer", description: "单页条目数，默认 500，上限 2000" },
       },
     },
   },
@@ -750,11 +757,15 @@ const AKM_GLOB_TOOL: AgentTool = {
   type: "function",
   function: {
     name: "akm_glob",
-    description: "在工作区内按 glob 模式匹配文件或目录路径（相对工作区根目录返回），如 **/*.py",
+    description:
+      "在工作区内按 glob 模式匹配文件路径（相对工作区根目录返回，按修改时间倒序），如 **/*.py；" +
+      "结果被 limit 截断时返回 truncated=true 与 notice",
     parameters: {
       type: "object",
       properties: {
         pattern: { type: "string", description: "glob 匹配模式，如 **/*.py" },
+        path: { type: "string", description: "限定遍历的子目录（工作区内），留空表示整个工作区" },
+        limit: { type: "integer", description: "返回条数上限，默认 100，上限 1000" },
       },
       required: ["pattern"],
     },
@@ -765,13 +776,23 @@ const AKM_GREP_TOOL: AgentTool = {
   type: "function",
   function: {
     name: "akm_grep",
-    description: "在工作区内按正则搜索文件内容，返回命中的文件、行号与行内容",
+    description:
+      "在工作区内按正则搜索文件内容，返回命中的文件、行号与行内容；每个文件返回其全部命中行，" +
+      "候选文件按修改时间倒序扫描。支持 include 过滤、output_mode 三种模式与 head_limit，" +
+      "结果被截断时返回 truncated=true 与 notice",
     parameters: {
       type: "object",
       properties: {
-        pattern: { type: "string", description: "要搜索的正则表达式" },
-        path: { type: "string", description: "限定搜索的目录或文件（工作区内），留空递归搜索整个工作区" },
+        pattern: { type: "string", description: "要搜索的正则表达式（Python re 语法）" },
+        path: { type: "string", description: "限定搜索的目录或单个文件（工作区内），留空递归搜索整个工作区" },
         case_sensitive: { type: "boolean", description: "是否区分大小写，默认 false" },
+        include: { type: "string", description: "只搜匹配该 glob 的文件；不含 / 时按文件名匹配，如 *.py" },
+        output_mode: {
+          type: "string",
+          enum: ["content", "files_with_matches", "count"],
+          description: "content 返回命中行内容（默认）；files_with_matches 只返回文件列表；count 返回每个文件的命中数",
+        },
+        head_limit: { type: "integer", description: "上限：content 模式按命中行数、其它模式按匹配文件数，默认 100，上限 4000" },
       },
       required: ["pattern"],
     },
@@ -800,14 +821,15 @@ const AKM_WRITE_FILE_TOOL: AgentTool = {
   function: {
     name: "akm_write_file",
     description:
-      "新建或覆盖工作区内的文本文件（mode=overwrite 覆盖 / append 追加）。" +
-      "仅 agent_write_tools_enabled=true 时可用",
+      "新建或覆盖工作区内的文本文件（mode=overwrite 覆盖 / append 追加）。覆盖已存在文件前必须先用 " +
+      "akm_read_file 读过（或用 tag 声明要改的版本），写入后返回新 tag 与 diff。仅 agent_write_tools_enabled=true 时可用",
     parameters: {
       type: "object",
       properties: {
         path: { type: "string", description: "工作区内的文件路径（相对工作区根目录的路径）" },
-        content: { type: "string", description: "要写入的文本内容" },
+        content: { type: "string", description: "要写入的完整文本内容" },
         mode: { type: "string", enum: ["overwrite", "append"], description: "overwrite 覆盖（默认）或 append 追加" },
+        tag: { type: "string", description: "可选：akm_read_file 返回的 4 位 tag；提供时会校验文件未被外部改动" },
       },
       required: ["path", "content"],
     },
@@ -821,19 +843,20 @@ const AKM_EDIT_FILE_TOOL: AgentTool = {
   function: {
     name: "akm_edit_file",
     description:
-      "结构化编辑工作区内的文本文件，支持两种定位方式：行号模式传 start_line（1-based，可配 end_line）" +
-      "把行区间替换为 new_content，推荐先读文件拿到行号后用，另可配 old_string 做锚点校验防止改错位置；" +
-      "内容模式将 old_string 替换为 new_string。仅 agent_write_tools_enabled=true 时可用",
+      "结构化编辑工作区内的文本文件，编辑前需先 akm_read_file 读过该文件。两种定位方式：行号模式传 start_line（1-based，可配 end_line）" +
+      "把行区间替换为 new_content，推荐配 old_string 做锚点校验防止改错位置；内容模式把 old_string 替换为 new_string，" +
+      "old_string 必须唯一匹配（多处命中需补充上下文或传 replace_all=true）。成功后返回新 tag 与 diff。仅 agent_write_tools_enabled=true 时可用",
     parameters: {
       type: "object",
       properties: {
         path: { type: "string", description: "工作区内的文件路径" },
-        old_string: { type: "string", description: "行号模式下作为目标行区间的锚点校验内容（可选）；内容模式下为要被替换的原文片段" },
-        new_string: { type: "string", description: "内容模式下的替换文本，可留空表示删除（仅内容模式使用）" },
-        replace_all: { type: "boolean", description: "内容模式下是否替换所有匹配（默认只替换第一处）" },
-        start_line: { type: "integer", description: "行号模式起始行号（1-based）；传此字段进入行号模式，把 [start_line, end_line] 区间整体替换为 new_content" },
+        old_string: { type: "string", description: "行号模式下作为目标行区间的锚点校验内容（可选）；内容模式下为要被替换的原文片段（必须唯一匹配）" },
+        new_string: { type: "string", description: "内容模式下的替换文本，可留空表示删除" },
+        replace_all: { type: "boolean", description: "内容模式下是否替换所有匹配（默认 false，多处命中会报错要求收窄）" },
+        start_line: { type: "integer", description: "行号模式起始行号（1-based，与 akm_read_file 返回的行号一致）；传此字段进入行号模式，把 [start_line, end_line] 区间整体替换为 new_content" },
         end_line: { type: "integer", description: "行号模式结束行号（含，默认等于 start_line，只替换一行）" },
         new_content: { type: "string", description: "行号模式下的新内容（可多行），替换目标行区间" },
+        tag: { type: "string", description: "可选：akm_read_file 返回的 4 位 tag；提供时会校验文件未被外部改动" },
       },
       required: ["path"],
     },
@@ -894,34 +917,43 @@ const AKM_RUN_SHELL_TOOL: AgentTool = {
   },
 };
 
-// 创建/修改 xlsx 电子表格工具（对应后端内置 akm_xlsx，需 agent_write_tools_enabled=true）。
-// action=create 用二维数组或 {工作表名: 二维数组} 新建；action=edit 用 updates=[{sheet, cell, value}] 写入已有文件单元格。
-const AKM_XLSX_TOOL: AgentTool = {
+// 移动/复制工具（对应后端内置 akm_move_file / akm_copy_file，需 agent_write_tools_enabled=true）。
+// 单独存在的原因：早先挪一个文件要 read + write + delete 三步，既费 token 又丢权限位与 mtime。
+const AKM_MOVE_FILE_TOOL: AgentTool = {
   type: "function",
   function: {
-    name: "akm_xlsx",
+    name: "akm_move_file",
     description:
-      "创建或修改工作区内的 .xlsx 电子表格文件。action=create 新建（data 为二维数组或 {sheet名: 二维数组}，目标已存在时需 overwrite=true）；" +
-      "action=edit 修改已有文件（updates 为 [{sheet, cell, value}] 单元格写入列表）。两种 action 共用可选自定义参数：styles 设置单元格字体/背景/对齐/数字格式，" +
-      "column_widths / row_heights 设列宽行高，merge_cells 合并单元格，freeze_panes 冻结窗格，charts 添加柱状/折线/饼图等图表；value 以 = 开头按公式写入。" +
-      "仅 agent_write_tools_enabled=true 时可用",
+      "在工作区内移动或重命名文件/目录（一步完成，不必 read+write+delete）。" +
+      "目标已存在时需显式传 overwrite=true。仅 agent_write_tools_enabled=true 时可用",
     parameters: {
       type: "object",
       properties: {
-        action: { type: "string", enum: ["create", "edit"], description: "create 新建 / edit 修改" },
-        path: { type: "string", description: "工作区内的 .xlsx 文件路径" },
-        data: { type: "object", description: "create 用：二维数组（[[...],[...]]）或 {sheet名: 二维数组} 映射" },
-        sheet: { type: "string", description: "create 时纯数组数据写入的工作表名，默认 Sheet1" },
-        overwrite: { type: "boolean", description: "create 时目标已存在是否覆盖，默认 false" },
-        updates: { type: "array", items: { type: "object" }, description: "edit 用：[{sheet, cell, value}] 单元格写入列表，cell 如 A1；value 以 = 开头写公式" },
-        styles: { type: "array", items: { type: "object" }, description: "单元格样式：[{sheet?, cell, bold?, italic?, size?, color?, fill?, align?, number_format?}]，color/fill 为十六进制色值（如 FF0000）" },
-        column_widths: { type: "object", description: "列宽：{sheet?: {列名: 宽度}}，如 {\"Sheet1\": {\"A\": 20}}，sheet 键可省略默认 Sheet1" },
-        row_heights: { type: "object", description: "行高：{sheet?: {行号: 高度}}" },
-        merge_cells: { type: "object", description: "合并单元格：{sheet?: [区间...]}，如 {\"Sheet1\": [\"A1:C1\"]}" },
-        freeze_panes: { type: "object", description: "冻结窗格：{sheet?: \"A2\"}" },
-        charts: { type: "array", items: { type: "object" }, description: "图表列表：[{sheet?, type, title?, data_range, categories_range?, x_title?, y_title?, anchor?, legend?}]，type 为 bar/line/pie/scatter/area/doughnut，data_range 如 B2:B6" },
+        path: { type: "string", description: "工作区内要移动的源文件或目录路径" },
+        dest: { type: "string", description: "目标路径（工作区内），父目录不存在时自动创建" },
+        overwrite: { type: "boolean", description: "目标已存在时是否覆盖，默认 false" },
       },
-      required: ["action", "path"],
+      required: ["path", "dest"],
+    },
+  },
+};
+
+const AKM_COPY_FILE_TOOL: AgentTool = {
+  type: "function",
+  function: {
+    name: "akm_copy_file",
+    description:
+      "在工作区内复制文件或目录（复制目录需 recursive=true，会自动跳过 node_modules/.git 等忽略目录与敏感文件）。" +
+      "目标已存在时需显式传 overwrite=true。仅 agent_write_tools_enabled=true 时可用",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "工作区内要复制的源文件或目录路径" },
+        dest: { type: "string", description: "目标路径（工作区内）" },
+        recursive: { type: "boolean", description: "源是目录时必须为 true" },
+        overwrite: { type: "boolean", description: "目标已存在时是否覆盖，默认 false" },
+      },
+      required: ["path", "dest"],
     },
   },
 };
@@ -1018,7 +1050,8 @@ export function resolveDeclaredTools(tools: string[]): AgentTool[] {
     AKM_EDIT_FILE_TOOL,
     AKM_MAKE_DIR_TOOL,
     AKM_DELETE_FILE_TOOL,
-    AKM_XLSX_TOOL,
+    AKM_MOVE_FILE_TOOL,
+    AKM_COPY_FILE_TOOL,
   );
   // shell 与 git：始终声明，可用性由后端配置开关控制
   declared.push(AKM_RUN_SHELL_TOOL, AKM_RUN_GIT_TOOL);
