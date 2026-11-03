@@ -102,6 +102,12 @@ type Routed = {
   labelY: number;
   /** 进场动画延迟（毫秒）：按源节点所在层递增 */
   delay: number;
+  /**
+   * 该边走了「本行下方的行间通道」（LR 跨列绕行）。
+   * 若这条通道位于最后一行，布局必须为它预留底部空间——否则通道与标签会落到
+   * 画布外被 viewBox 裁掉（表现为底边只剩一行贴着边缘的小字，线完全看不见）。
+   */
+  needsBottomSpace?: boolean;
 };
 
 /**
@@ -237,10 +243,17 @@ function normalizeFlowBlock(block: FlowBlock): ResolvedFlowBlock {
   };
 }
 
-/** 有分组时整体下移，给分组标签留出空间（否则标签会被画布顶边裁掉） */
-function shiftForGroups(block: ResolvedFlowBlock, positioned: Positioned[]): void {
-  if (!block.groups.length) return;
-  for (const item of positioned) item.y += GROUP_LABEL_H;
+/**
+ * 有分组时整体下移的量，给分组标签留出空间（否则标签会被画布顶边裁掉）。
+ *
+ * 关键：这个偏移必须并入**布局起点**（TB 的节点 y / LR 的初始 cursor），
+ * 而不是像旧实现那样布局算完再统一 `item.y += GROUP_LABEL_H` 平移。
+ * 事后平移会让所有基于 rowY / 行高派生的坐标继续留在旧坐标系里：
+ * 分组框包围盒、跨列绕行通道、总高度全都差 16px —— 表现为分组框底边被顶到
+ * 画布外裁掉、绕行通道连同标签一起落到画布下方（只看得见贴底一行小字）。
+ */
+function groupOffset(block: ResolvedFlowBlock): number {
+  return block.groups.length ? GROUP_LABEL_H : 0;
 }
 
 /**
@@ -358,6 +371,8 @@ function layoutFlow(block: ResolvedFlowBlock, maxCols: number, available: number
     );
     const backChannelX = Math.max(26, backLabelW / 2 + 8);
     const extraLeft = backChannelX + 10;
+    // 分组标签占用顶部一条，直接并进布局起点（见 groupOffset 的说明）
+    const offsetY = groupOffset(block);
     const positioned: Positioned[] = [];
     layerKeys.forEach((key, order) => {
       const bucket = byLayer.get(key)!;
@@ -367,12 +382,11 @@ function layoutFlow(block: ResolvedFlowBlock, maxCols: number, available: number
           node,
           // 整体右移，给回边通道留出空间
           x: PAD + extraLeft + offset + index * crossStep,
-          y: PAD + order * mainStep,
+          y: PAD + offsetY + order * mainStep,
           delay: order * STAGGER + 120,
         });
       });
     });
-    shiftForGroups(block, positioned);
     const byId = new Map(positioned.map(item => [item.node.id, item]));
     const routed: Routed[] = [];
     for (const edge of block.edges) {
@@ -428,7 +442,8 @@ function layoutFlow(block: ResolvedFlowBlock, maxCols: number, available: number
     const columns = Math.max(...layerKeys.map(key => byLayer.get(key)!.length));
     // 宽度要把左侧回边通道（extraLeft）算进去，否则最右侧节点会被画布裁掉
     const width = PAD * 2 + extraLeft + columns * (nodeW + GAP_CROSS) - GAP_CROSS;
-    const height = PAD * 2 + layerKeys.length * (NODE_H + GAP_MAIN_TB) - GAP_MAIN_TB;
+    // 高度要把分组标签占用的 offsetY 算进去，否则分组框与末层节点整体溢出画布
+    const height = PAD * 2 + offsetY + layerKeys.length * (NODE_H + GAP_MAIN_TB) - GAP_MAIN_TB;
     avoidLabelCollisions(positioned, routed, nodeW, height);
     const groupBoxes = computeGroupBoxes(block, positioned, nodeW);
     const legend = block.legend ? computeLegend(positioned) : [];
@@ -462,7 +477,8 @@ function layoutFlow(block: ResolvedFlowBlock, maxCols: number, available: number
     rowHeights[row] = Math.max(rowHeights[row] ?? 0, slotHeight);
   });
   const rowY: number[] = [];
-  let cursor = PAD;
+  // 分组标签占顶部一条，直接并进初始 cursor（见 groupOffset 的说明）
+  let cursor = PAD + groupOffset(block);
   rowHeights.forEach((rowHeight, row) => {
     rowY[row] = cursor;
     cursor += rowHeight + GAP_ROW;
@@ -472,7 +488,8 @@ function layoutFlow(block: ResolvedFlowBlock, maxCols: number, available: number
   // LR 一行放 usedCols 个节点：宽度按容器反算，宽卡片里节点被撑开、文字完整
   const nodeW = fitNodeWidth(available, usedCols, GAP_MAIN_LR);
   const contentWidth = PAD * 2 + usedCols * nodeW + (usedCols - 1) * GAP_MAIN_LR;
-  const contentHeight = cursor - GAP_ROW + PAD;
+  // 后面跨列绕行边可能需要额外底部空间，所以先留成 let
+  let contentHeight = cursor - GAP_ROW + PAD;
 
   const positioned: Positioned[] = [];
   layerKeys.forEach((key, order) => {
@@ -491,7 +508,7 @@ function layoutFlow(block: ResolvedFlowBlock, maxCols: number, available: number
     });
   });
 
-  shiftForGroups(block, positioned);
+
   const byId = new Map(positioned.map(item => [item.node.id, item]));
   const gridOf = (layerKey: number) => {
     const order = layerKeys.indexOf(layerKey);
@@ -540,6 +557,8 @@ function layoutFlow(block: ResolvedFlowBlock, maxCols: number, available: number
           path: `M ${sxOff} ${source.y + NODE_H} V ${channel} H ${txOff} V ${target.y + NODE_H}`,
           labelX: (sxOff + txOff) / 2,
           labelY: channel,
+          // 最后一行下方的通道外面已经没有别的行，必须由布局额外留出底部空间
+          needsBottomSpace: sg.row === rowOf(layerKeys.length - 1),
         });
       } else {
         routed.push({
@@ -592,6 +611,14 @@ function layoutFlow(block: ResolvedFlowBlock, maxCols: number, available: number
     }
   }
 
+  // 最后一行下方还有跨列绕行通道时，通道与它的标签都在「行底 + GAP_ROW/2」处，
+  // 而 contentHeight 只留了 PAD 的底边距 —— 不补这段空间，通道整条与标签都会
+  // 落到画布外被裁掉（用户看到的就是底边孤零零一行小字、线完全不见）。
+  if (routed.some(item => item.needsBottomSpace)) {
+    // contentHeight 末尾已经含了一份 PAD 底边距，这里补的是「通道相对行底的额外深度」
+    // 加上 label 背景块高度；再减掉那份已计过的 PAD，避免底部空出大半行。
+    contentHeight += GAP_ROW / 2 + LABEL_BOX_H - PAD;
+  }
   // 传内容高度（不含底部 legend 区）：label 不能越界到图例区里
   avoidLabelCollisions(positioned, routed, nodeW, contentHeight);
 
