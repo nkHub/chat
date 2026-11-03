@@ -429,7 +429,7 @@ function layoutFlow(block: ResolvedFlowBlock, maxCols: number, available: number
     // 宽度要把左侧回边通道（extraLeft）算进去，否则最右侧节点会被画布裁掉
     const width = PAD * 2 + extraLeft + columns * (nodeW + GAP_CROSS) - GAP_CROSS;
     const height = PAD * 2 + layerKeys.length * (NODE_H + GAP_MAIN_TB) - GAP_MAIN_TB;
-    avoidLabelCollisions(positioned, routed, nodeW);
+    avoidLabelCollisions(positioned, routed, nodeW, height);
     const groupBoxes = computeGroupBoxes(block, positioned, nodeW);
     const legend = block.legend ? computeLegend(positioned) : [];
     const legendSpace = legend.length ? LEGEND_H : 0;
@@ -521,13 +521,35 @@ function layoutFlow(block: ResolvedFlowBlock, maxCols: number, available: number
       const sy = source.y + NODE_H / 2;
       const ty = target.y + NODE_H / 2;
       const midX = (sx + tx) / 2;
-      routed.push({
-        edge,
-        delay,
-        path: `M ${sx} ${sy} H ${midX} V ${ty} H ${tx}`,
-        labelX: midX,
-        labelY: (sy + ty) / 2 - 6,
-      });
+      // 只有**相邻列**才允许直线横连。跨列（中间还夹着别的层）时直线会横穿中间
+      // 节点的边框与文字——图上就是「标签压在框上、连线穿过框」，回向边尤其明显。
+      // 这类边改走本行下方的行间通道（GAP_ROW 留出的空档），从两个节点底部绕行。
+      if (Math.abs(tg.col - sg.col) > 1) {
+        const channel = rowY[sg.row] + rowHeights[sg.row] + GAP_ROW / 2;
+        const bx = source.x + nodeW / 2;
+        const bt = target.x + nodeW / 2;
+        // 起止点各向「远离对方」的方向错开一点：同一个节点往往还有一条笔直上下的
+        // 边（如「转发到本地」），若绕行边也从底部正中出线，两段竖线会完全重合，
+        // 看上去像一条线分叉。错开 14px 后两条线始终可分辨。
+        const dir = bt > bx ? 1 : -1;
+        const sxOff = bx - dir * 14;
+        const txOff = bt + dir * 14;
+        routed.push({
+          edge,
+          delay,
+          path: `M ${sxOff} ${source.y + NODE_H} V ${channel} H ${txOff} V ${target.y + NODE_H}`,
+          labelX: (sxOff + txOff) / 2,
+          labelY: channel,
+        });
+      } else {
+        routed.push({
+          edge,
+          delay,
+          path: `M ${sx} ${sy} H ${midX} V ${ty} H ${tx}`,
+          labelX: midX,
+          labelY: (sy + ty) / 2 - 6,
+        });
+      }
     } else if (tg.row > sg.row) {
       // 换到下一行：源底部 → 目标行上方的行间通道 → 目标顶部
       const channel = rowY[tg.row] - GAP_ROW / 2;
@@ -570,7 +592,8 @@ function layoutFlow(block: ResolvedFlowBlock, maxCols: number, available: number
     }
   }
 
-  avoidLabelCollisions(positioned, routed, nodeW);
+  // 传内容高度（不含底部 legend 区）：label 不能越界到图例区里
+  avoidLabelCollisions(positioned, routed, nodeW, contentHeight);
 
   const groupBoxes = computeGroupBoxes(block, positioned, nodeW);
   const legend = block.legend ? computeLegend(positioned) : [];
@@ -601,12 +624,32 @@ function labelWidth(label: string): number {
   return Math.round(Math.min(width + 10, LABEL_MAX_W));
 }
 
+/** 边 label 背景块尺寸：从 labelY-11 处起画、高 15px（渲染处与避让共用） */
+const LABEL_BOX_H = 15;
+const LABEL_BOX_DY = 11;
+/** 候选位移：原位 → 向上 1~3 档 → 向下 1~3 档（每档 22px） */
+const LABEL_SHIFT_STEPS = [0, -22, -44, -66, 22, 44, 66];
+
 /**
  * 边 label 避让：label 默认压在边的中点上，短边（尤其是分支汇合处）会盖住节点边缘。
- * 这里做一次简单碰撞检测——与任何节点框相交就沿垂直方向往上挪 22px，最多 3 次。
  * 不做完整正交避障：卡片里元素少，让开一格就够读。
+ *
+ * 必须同时满足两个约束（此前只做了第一条）：
+ * 1. 不与任何节点框相交；
+ * 2. **label 背景块完整落在画布内**。旧实现只往上挪、且没有上界，靠近画布顶部的
+ *    label 会被一路推到 y<0，直接被 viewBox 裁掉——用户看到的是节点上方一条几像素
+ *    的灰边，标签文字彻底消失（如 `active 外连建隧道（关键）` 这类贴着首行节点的回边标签）。
+ *    所以这里先向上让位，向上没空间（会出画布）就改为向下让位；全都撞时夹到画布内，
+ *    宁可压住节点边缘，也不能让标签消失在画布外。
+ *
+ * canvasHeight 由调用方传入（TB 传布局高度、LR 传内容高度），用于算出 y 的下界。
  */
-function avoidLabelCollisions(positioned: Positioned[], routed: Routed[], nodeW: number): void {
+function avoidLabelCollisions(
+  positioned: Positioned[],
+  routed: Routed[],
+  nodeW: number,
+  canvasHeight: number,
+): void {
   const boxes = positioned.map(item => ({ x: item.x, y: item.y }));
   const hits = (rect: { x: number; y: number; w: number; h: number }) =>
     boxes.some(
@@ -616,19 +659,27 @@ function avoidLabelCollisions(positioned: Positioned[], routed: Routed[], nodeW:
         rect.y < box.y + NODE_H &&
         rect.y + rect.h > box.y,
     );
+  // 背景块必须留 2px 边距完整落在画布内，否则会被 viewBox 裁掉
+  const minTop = 2;
+  const maxTop = Math.max(minTop, canvasHeight - 2 - LABEL_BOX_H);
+  const clampTop = (top: number) => Math.min(maxTop, Math.max(minTop, top));
 
   for (const item of routed) {
     const label = item.edge.label;
     if (!label) continue;
     // 与渲染处共用 labelWidth()，保证布局避让和实际绘制用的是同一个宽度
     const width = labelWidth(label);
-    const rect = { x: item.labelX - width / 2, y: item.labelY - 11, w: width, h: 15 };
-    let guard = 0;
-    while (hits(rect) && guard < 3) {
-      rect.y -= 22;
-      guard += 1;
+    const baseTop = item.labelY - LABEL_BOX_DY;
+    // 先夹一次：原位本身就在画布外时（例如回边通道贴顶），也要先拉回画布内
+    let chosen = clampTop(baseTop);
+    for (const dy of LABEL_SHIFT_STEPS) {
+      const top = clampTop(baseTop + dy);
+      if (!hits({ x: item.labelX - width / 2, y: top, w: width, h: LABEL_BOX_H })) {
+        chosen = top;
+        break;
+      }
     }
-    item.labelY = rect.y + 11;
+    item.labelY = chosen + LABEL_BOX_DY;
   }
 }
 
@@ -842,9 +893,9 @@ export const FlowDiagram = memo(({ block: rawBlock }: { block: FlowBlock }) => {
                           只有 22px 却给了 41px 白底，白块比字宽一倍，看着又挤又脏。 */}
                       <rect
                         x={labelX - labelWidth(edge.label) / 2}
-                        y={labelY - 10}
+                        y={labelY - LABEL_BOX_DY}
                         width={labelWidth(edge.label)}
-                        height={15}
+                        height={LABEL_BOX_H}
                         rx={4}
                         className="fill-background"
                         opacity={0.92}
