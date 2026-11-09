@@ -44,6 +44,11 @@ const TOOL_LABELS: Record<string, StepLabel> = {
   akm_delete_file: { action: "删除文件", tone: "write" },
   akm_move_file: { action: "移动文件", tone: "write" },
   akm_copy_file: { action: "复制文件", tone: "write" },
+  // ── 工具网关（工具按需加载）──
+  // 可用工具数超过后端阈值时，长尾工具被折叠到这两个入口后面：list 查名字与参数，
+  // call 按名字执行（它内层真正执行的工具名由事件的 inner_name 给出，通常不会显示 call 本身）。
+  akm_list_tools: { action: "查看可用工具", tone: "read" },
+  akm_call_tool: { action: "调用工具", tone: "other" },
   // ── 命令与版本控制 ──
   akm_run_shell: { action: "执行命令", tone: "system" },
   akm_run_git: { action: "Git 操作", tone: "system" },

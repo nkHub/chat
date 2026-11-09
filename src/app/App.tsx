@@ -488,13 +488,16 @@ export default function App() {
           });
         } else if (event.event === "tool_call") {
           finalizeStream();
-          const name = event.data.name || "工具";
+          // 工具网关折叠执行时（akm_call_tool）用 inner_name 展示内层真实工具，
+          // 否则时间线里只剩「call_tool」这种裸露名字。
+          const name = event.data.inner_name || event.data.name || "工具";
           // 工具步开始时刻：优先服务端 ts（真实发起时刻，不含网络往返）
           segments.push({ type: "tool", name, params: event.data.arguments ?? {}, result: null, status: "running", startedAt: lastEventTs || Date.now() });
           updateAssistant({ segments: segments.slice(), streamStatus: `正在调用 ${name}…` });
         } else if (event.event === "tool_result") {
           finalizeStream();
-          const name = event.data.name || "工具";
+          // 与 tool_call 同口径：折叠调用时状态文案也用内层真实工具名
+          const name = event.data.inner_name || event.data.name || "工具";
           const hasError = Boolean(event.data.error);
           for (let index = segments.length - 1; index >= 0; index -= 1) {
             const segment = segments[index];

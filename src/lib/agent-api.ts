@@ -1086,6 +1086,10 @@ export type AgentStreamEvent = {
     turns?: number;
     usage?: Record<string, number>;
     error?: string;
+    // 工具网关（工具按需加载）：后端把长尾工具折叠后，模型调的是 akm_call_tool，
+    // 真实执行的工具名放在 inner_name 里；普通工具与旧服务端不发该字段。
+    // 前端优先用它展示动作标签，否则时间线会裸露成「call_tool」。
+    inner_name?: string;
     // 交互澄清：ask_user 事件携带 AI 想问的问题（question）、候选答案（options，
     // 不传为自由文本）、是否可多选（multiple，仅 options 有值时有效）以及可续跑
     // 的完整上下文（messages，working_messages）。客户端在用户回答后把回答追加进
