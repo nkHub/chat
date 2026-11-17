@@ -9,7 +9,8 @@ import {
   clampScale,
   formatZoom,
   isOriginalView,
-  normalizeRotation,
+  isQuarterTurn,
+  nearestZeroRotation,
   rotateBy,
   zoomBy,
 } from "@/lib/image-viewer";
@@ -24,6 +25,7 @@ const TOOLBAR_BUTTON =
 /** 视图状态收敛成一个对象：缩放 / 旋转 / 平移三者每次都要一起更新，拆成三个 state 极易读到互相不一致的旧值 */
 type View = { scale: number; rotation: number; x: number; y: number };
 
+/** 初始视图与换图复位用；**不要**拿它当"复位按钮"的实现，那会把角度硬拉回 0 而绕圈 */
 const ORIGINAL_VIEW: View = { scale: 1, rotation: 0, x: 0, y: 0 };
 
 /**
@@ -73,7 +75,9 @@ function Lightbox({ url, onClose }: { url: string; onClose: () => void }) {
     const image = imageRef.current;
     const viewport = viewportRef.current;
     if (!image || !viewport) return null;
-    const swapped = rotation % 180 !== 0;
+    // 用 isQuarterTurn 判断（内部会先归一），否则 -90° 会被算成"没对调"：
+    // rotation 现在是累计值，可能是负数或大于 360
+    const swapped = isQuarterTurn(rotation);
     return {
       size: swapped
         ? { width: image.offsetHeight, height: image.offsetWidth }
@@ -86,7 +90,11 @@ function Lightbox({ url, onClose }: { url: string; onClose: () => void }) {
   const commit = useCallback(
     (next: View) => {
       const scale = clampScale(next.scale);
-      const rotation = normalizeRotation(next.rotation);
+      // 注意：**不要**在这里把 rotation 归一化到 [0,360)。
+      // 累计角度直接喂给 transform，CSS transition 才会沿"加了多少"插值；
+      // 一旦归一，逆时针一步 0 → 270 会实打实转 3/4 圈（就是用户看到的"转了好几圈"）。
+      // 归一化只在需要比较的地方调用（isQuarterTurn / isOriginalView）。
+      const rotation = Number.isFinite(next.rotation) ? next.rotation : 0;
       let position = { x: next.x, y: next.y };
       const measured = measure(rotation);
       // 缩到 1 倍以内时图片装得下，平移无意义，clampOffset 会归零
@@ -107,7 +115,15 @@ function Lightbox({ url, onClose }: { url: string; onClose: () => void }) {
     [commit],
   );
 
-  const resetView = useCallback(() => setView(ORIGINAL_VIEW), []);
+  /**
+   * 复位：角度落到**最接近的 360 倍**，而不是硬写 0。
+   * 已经转到 270° 时写 0 会让 transition 倒着扫 270°（又像在绕圈），
+   * 落到 360° 只转 90°，视觉上就是"回到原样"。
+   */
+  const resetView = useCallback(
+    () => setView({ scale: 1, rotation: nearestZeroRotation(viewRef.current.rotation), x: 0, y: 0 }),
+    [],
+  );
 
   // 键盘：Esc 关闭、+/- 缩放、0 复位、r 旋转。
   // 用 keydown（不是 keypress）才能收到 Esc 与功能键。
@@ -206,7 +222,8 @@ function Lightbox({ url, onClose }: { url: string; onClose: () => void }) {
   };
 
   const adjusted = !isOriginalView(view.scale, view.rotation);
-  const rotated = view.rotation % 180 !== 0;
+  // 用归一后的比较判断宽高是否对调；transform 里仍用累计角度
+  const rotated = isQuarterTurn(view.rotation);
   const transform = `translate(${view.x}px, ${view.y}px) rotate(${view.rotation}deg) scale(${view.scale})`;
 
   return (
@@ -265,7 +282,7 @@ function Lightbox({ url, onClose }: { url: string; onClose: () => void }) {
           className={TOOLBAR_BUTTON}
           aria-label="逆时针旋转"
           title="逆时针旋转"
-          onClick={() => commit({ ...viewRef.current, rotation: normalizeRotation(viewRef.current.rotation - 90) })}
+          onClick={() => commit({ ...viewRef.current, rotation: rotateBy(viewRef.current.rotation, -90) })}
         >
           <RotateCcw size={15} />
         </button>

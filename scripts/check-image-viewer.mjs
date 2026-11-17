@@ -6,8 +6,9 @@
 // 覆盖的都是「写错了肉眼看不出来」的规则：
 //   1. 缩放钳制在 [MIN_SCALE, MAX_SCALE]，NaN / Infinity 视为复位
 //   2. 缩放累计不越界（连点 + 到上限后停住）
-//   3. 旋转连续 4 次精确回到 0（不能是 360 / -0，否则 isOriginalView 判断失效）
-//   4. 逆时针旋转得到 270，而不是 -90
+//   3. rotateBy 返回累计值，每步只走 90°（曾经归一化导致 CSS transition 绕远路）
+//   4. 复位落到最近的 360 倍（硬写 0 会让 270 倒扫 270°）
+//   5. 宽高对调判定（isQuarterTurn）在 -90 / 450 等等价角下同样成立
 //   5. 缩放百分比文案：整数不带小数点，非整数保留一位
 //   6. 平移边界：放大后能拖动、缩小后强制归零、不越出图片边缘
 //
@@ -40,6 +41,8 @@ const {
   normalizeRotation,
   rotateBy,
   isOriginalView,
+  isQuarterTurn,
+  nearestZeroRotation,
   formatZoom,
   clampOffset,
 } = await import(`${OUT_DIR}/image-viewer.mjs`);
@@ -96,12 +99,48 @@ eq("NaN 归零", normalizeRotation(NaN), 0);
 // 关键：不能用 === -0 判定，Object.is(-0, 0) 为 false，这里必须真等于 +0
 check("归零结果是 +0 而非 -0", Object.is(normalizeRotation(-360), 0), String(normalizeRotation(-360)));
 
-// ---- 4. rotateBy：连续 4 次必须精确回到 0 ----
+// ---- 4. rotateBy：返回累计值，每步只走 90°（回归：曾经归一化导致"转好几圈"）----
+// 关键点：rotateBy 必须返回**累加值**。曾经它返回 [0,360) 归一值，
+// 于是逆时针一步 0 → 270，CSS transition 会实打实转 3/4 圈，观感像"转了好几圈"。
 let rotation = 0;
 for (let i = 0; i < 4; i += 1) rotation = rotateBy(rotation);
-check("连续旋转 4 次回到 0（不是 360）", Object.is(rotation, 0), String(rotation));
+eq("连续旋转 4 次累计 360", rotation, 360);
+eq("累计 360 归一仍是 0", normalizeRotation(rotation), 0);
+// 每一步的绝对增量必须恰好一个步长，否则会出现"绕远路"的过渡动画
+rotation = 0;
+let maxStep = 0;
+for (let i = 0; i < 6; i += 1) {
+  const next = rotateBy(rotation, -ROTATION_STEP);
+  maxStep = Math.max(maxStep, Math.abs(next - rotation));
+  rotation = next;
+}
+eq("逆时针每步的绝对增量为 90", maxStep, 90);
+eq("逆时针 6 步累计 -540", rotation, -540);
 eq("旋转步长是 90 的整数倍", ROTATION_STEP % 90, 0);
-eq("逆时针一步得到 270", normalizeRotation(0 - ROTATION_STEP), 270);
+// 归一化只用于比较：逆时针一步归一后是 270
+eq("逆时针一步归一为 270", normalizeRotation(0 - ROTATION_STEP), 270);
+
+// ---- 4b. nearestZeroRotation：复位要落到最近的 360 倍，不能硬写 0 ----
+eq("0 度复位到 0", nearestZeroRotation(0), 0);
+eq("270 度复位到 360（只转 90，不倒扫 270）", nearestZeroRotation(270), 360);
+// 180 是正中间，向上取到 360（Math.round 半值进位），两个方向都只走 180
+check("180 度复位到 360（半值进位，两个方向都走 180）", nearestZeroRotation(180) === 360);
+eq("-90 度复位到 0", nearestZeroRotation(-90), 0);
+eq("-270 度复位到 -360（只转 90）", nearestZeroRotation(-270), -360);
+eq("-540 度复位到 -360", nearestZeroRotation(-540), -360);
+check("复位后归一必为 0（270）", normalizeRotation(nearestZeroRotation(270)) === 0);
+check("复位后归一必为 0（-270）", normalizeRotation(nearestZeroRotation(-270)) === 0);
+check("复位角度差不超过 180", Math.abs(nearestZeroRotation(270) - 270) <= 180);
+
+// ---- 4c. isQuarterTurn：宽高对调判定 ----
+eq("0 度不对调", isQuarterTurn(0), false);
+eq("90 度对调", isQuarterTurn(90), true);
+eq("180 度不对调", isQuarterTurn(180), false);
+eq("270 度对调", isQuarterTurn(270), true);
+eq("-90 度对调", isQuarterTurn(-90), true);
+eq("-270 度对调", isQuarterTurn(-270), true);
+eq("360 度不对调", isQuarterTurn(360), false);
+eq("450 度对调", isQuarterTurn(450), true);
 
 // ---- 5. isOriginalView ----
 eq("1 倍 0 度是原始视图", isOriginalView(1, 0), true);

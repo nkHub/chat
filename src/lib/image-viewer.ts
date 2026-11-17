@@ -42,9 +42,37 @@ export function normalizeRotation(degrees: number): number {
   return positive === 0 ? 0 : positive;
 }
 
-/** 顺时针旋转一个步长 */
+/**
+ * 旋转一个步长，返回**累加值**而不是归一值。
+ *
+ * 这里刻意不做 [0, 360) 归一：CSS transition 是对 transform 里的角度做插值，
+ * 0deg → 270deg 会实打实转 3/4 圈。逆时针点一下得到 -90 才是"往回退 90°"，
+ * 若归一成 270，用户看到的是一下转了大半圈（本次修复的正是这个观感 bug）。
+ * 归一化只用于**比较**（isOriginalView / isQuarterTurn），不要用在这里。
+ */
 export function rotateBy(degrees: number, step: number = ROTATION_STEP): number {
-  return normalizeRotation(normalizeRotation(degrees) + step);
+  if (!Number.isFinite(degrees)) return step;
+  return degrees + step;
+}
+
+/**
+ * 复位时该把角度落到哪个"等价 0°"：取最接近的 360 的整数倍。
+ * 直接写 0 会让 transition 从 270° 倒着转 270°（看起来又是在绕圈）；
+ * 落到 360° 只转 90°，视觉上和"回到原样"一致，而且 normalizeRotation 后仍是 0。
+ */
+export function nearestZeroRotation(degrees: number): number {
+  if (!Number.isFinite(degrees)) return 0;
+  const snapped = Math.round(degrees / 360) * 360;
+  // Math.round(-0.25) 得到 -0，-0 * 360 仍是 -0；归一到 +0，
+  // 否则 Object.is 断言会失败，style 里也会拼出 "-0deg"
+  return snapped === 0 ? 0 : snapped;
+}
+/**
+ * 旋转是否让宽高对调（90° / 270° 及其等价角）。
+ * 用于两处：交换 max-width / max-height 上限、以及平移边界按交换后的尺寸计算。
+ */
+export function isQuarterTurn(degrees: number): boolean {
+  return normalizeRotation(degrees) % 180 === 90;
 }
 
 /**
