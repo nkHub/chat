@@ -26,6 +26,8 @@ npm run check:markdown   # Markdown 按块切分（切分无损 / 稳定块 / �
 npm run check:input      # 输入框 ↑↓ 历史游标（草稿保护 / 边界 / 让位规则）
 npm run check:quote      # 划选引用（每行加 >、空行、截断、拼接留空行）
 npm run check:smooth     # 流式文本打字机揭示（逐字排空 / 时间累积 / 提交限流）
+npm run check:image      # 图片预览的缩放 / 旋转 / 平移钳制
+npm run fonts:sync       # 重新从 Google Fonts 拉取自托管字体（换字体或升版本时才跑）
 ```
 
 打包给 AKM `agent_chat` 插件时**必须**带两个环境变量，缺一个就出错：
@@ -120,6 +122,8 @@ Agent 服务端已彻底移除对话历史落盘；旧版本遗留的 `~/.akm/ag
 - 工具展示位次集中登记：`src/lib/tool-registry.ts` 用一张表声明每个工具的 `display`（`inline` 进时间线 / `standalone` 专用卡片 / `hidden` 原位成卡片）。此前工具名散在 `agent-api.ts`（schema）、`process-groups.ts`（`HIDDEN_RENDER_TOOLS`）、`chat.tsx`（`isSpecialTool` 谓词）、`subagent.tsx`（子 Agent 名单）四处各写一遍，新增一个带 UI 的工具要改四个文件且容易漏；现在渲染侧不再出现具体工具名，未登记的工具默认 `inline`
 - 气泡与层次：用户消息气泡最宽 `80%`（长消息不会与整列齐平）；过程时间线展开的思考正文与工具 JSON 用 `text-muted-foreground` 一档更灰，与正文拉开层次
 - 卡片暗色适配：自绘卡片（stats / cards / kanban / alert / progress / map / chart）的配色映射表全部补 `dark:`（`bg-*-50` → `dark:bg-*-500/10`、`text-*-700` → `dark:text-*-300`），卡片壳 `bg-white` → `bg-card`；图表色改用 `stroke-chart-N`/`fill-chart-N` 类（SVG 的 `fill`/`stroke` attribute 不认 `var()`），轴标签 `fill="currentColor"` + `text-muted-foreground`，图例与 tooltip 走 `--muted-foreground` / `--popover`；地图 4 套 6 档热力色阶在暗色下改为同色相透明度叠层
+- 图片尺寸与预览：正文 Markdown 与工具卡片的生成图片都限高（正文 `max-h-[360px]`、工具卡片 `max-h-[200px]`，配 `object-contain` 不裁切），模型贴整屏大图时不再一张图顶满一屏；点任意图片进 Lightbox，右上角工具栏支持放大 / 缩小 / 百分比复位 / 顺逆时针旋转 / 恢复原始视图，另支持滚轮以光标为锚点缩放、放大后拖动平移、双击在 2 倍与复原间切换、`+ - 0 r Esc` 快捷键。缩放旋转只作用 `transform` 不动布局，所以拖动边界（`src/lib/image-viewer.ts`，`npm run check:image` 断言）始终以图片实际尺寸为基准
+- 字体自托管：Inter（300–600，可变字体单文件）+ DM Mono（400/500）的 woff2 放在 `src/assets/fonts/`，`src/styles/fonts.css` 是其 `@font-face`，**不再**依赖 `fonts.googleapis.com`。动机是不让离线 / 内网环境静默回退成系统字体、不把用户 IP 与 Referer 发给第三方、并省掉 `@import` 的串行 RTT。只取 latin / latin-ext 子集，中文由 `theme.css` 的回退链交给系统字体；换字体或升版本跑 `npm run fonts:sync` 重新生成（脚本按「同族多字重是否共用同一 URL」自动判断可变 / 静态字体）
 - 渲染工具模式补充：开启后服务端自动注入渲染指引（否则模型不会主动调）；单次上限 3 块、鼓励分次调用；卡片淡入 300ms（`motion-safe`，尊重 reduced-motion）
 
 ## 自动生成会话标题（默认关闭）

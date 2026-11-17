@@ -12,6 +12,8 @@
     "check:smooth": "node scripts/check-smooth-text.mjs",
     "check:input": "node scripts/check-input-history.mjs",
     "check:quote": "node scripts/check-quote.mjs",
+    "check:image": "node scripts/check-image-viewer.mjs",
+    "fonts:sync": "node scripts/fetch-fonts.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

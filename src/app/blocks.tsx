@@ -41,7 +41,9 @@ function FunctionCallBlock({ calls }: { calls: FunctionCall[] }) {
               {imageUrls.length > 0 && (
                 <div className="mt-2 grid grid-cols-2 gap-2">
                   {imageUrls.map((url, imageIndex) => (
-                    <img key={imageIndex} src={url} alt={`生成图片 ${imageIndex + 1}`} className="w-full cursor-zoom-in rounded border border-amber-200/70 bg-white/70 object-contain dark:border-amber-800/40 dark:bg-black/30" onClick={() => openPreview(url)} />
+                    // 双列网格里的缩略图：限高 200px，避免两张竖图把工具调用卡片撑成一屏高。
+                    // object-contain 保证不裁切；想看细节点开进 Lightbox（可缩放/旋转）。
+                    <img key={imageIndex} src={url} alt={`生成图片 ${imageIndex + 1}`} className="max-h-[200px] w-full cursor-zoom-in rounded border border-amber-200/70 bg-white/70 object-contain dark:border-amber-800/40 dark:bg-black/30" onClick={() => openPreview(url)} />
                   ))}
                 </div>
               )}

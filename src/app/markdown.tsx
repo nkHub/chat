@@ -33,7 +33,11 @@ const MARKDOWN_COMPONENTS: Components = {
     return (
       <img
         alt={alt ?? ""}
-        className="my-2 max-w-full cursor-zoom-in rounded-lg"
+        // 正文图片限制最大高度：模型常贴整屏大图（生成图 / 截图），
+        // 不限高时一张图就把整轮回答顶出视口，用户得滚很久才能看到文字。
+        // 用 max-h + object-contain 而不是裁切，保证图片完整可见；
+        // 想看原图点一下进 Lightbox（点开是全屏大图）。
+        className="my-2 max-h-[360px] max-w-full cursor-zoom-in rounded-lg object-contain"
         {...props}
         onClick={() => { if (props.src) openPreview(props.src); }}
       />
@@ -223,7 +227,8 @@ const THINKING_COMPONENTS: Components = {
     return (
       <img
         alt={alt ?? ""}
-        className="my-2 max-w-full cursor-zoom-in rounded-lg"
+        // 思考正文里的图片同样限高，理由见正文 MARKDOWN_COMPONENTS 的 img。
+        className="my-2 max-h-[360px] max-w-full cursor-zoom-in rounded-lg object-contain"
         {...props}
         onClick={() => { if (props.src) openPreview(props.src); }}
       />
