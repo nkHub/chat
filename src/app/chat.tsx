@@ -1,6 +1,6 @@
 import { Fragment, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
-import { ArrowDown, CircleStop, ImageIcon, Loader2, Lock, Paperclip, PanelLeftClose, PanelLeftOpen, Pencil, Search, Send, X } from "lucide-react";
+import { ArrowDown, CircleStop, ImageIcon, Loader2, Lock, Paperclip, PanelLeftClose, PanelLeftOpen, Pencil, Quote, Search, Send, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
@@ -8,14 +8,17 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { cn } from "@/lib/utils";
 import { AskUserCard, CitationsBlock, ContextHint, FunctionCallBlock, MessageActions, StatusNotice } from "./blocks";
 import { ComposerSuggest, type SuggestGroup } from "./composer-suggest";
-import { formatDisplayTime, messageText, splitSegmentForRender } from "./helpers";
-import { MemoMarkdown, StreamingCodeBlock, ThinkingBlock } from "./markdown";
+import { formatDisplayTime, messageText } from "./helpers";
+import { MemoMarkdown, SmoothSegmentBody, ThinkingBlock } from "./markdown";
 import { PreviewContext } from "./preview";
 import { EmptyChat, ModelSettingsPopover, ThemeSettingsPopover } from "./sidebar";
 import { BUILTIN_SKILLS, filterSkills, type Skill } from "./skills";
 import { collectSubagentList, collectSubagentRuns, findSubagentRun, isSubagentTool, SubagentCard, SubagentListCard, SubagentListPanel, SubagentPanel, type SubagentListTask, type SubagentRun } from "./subagent";
 import { groupSegments } from "@/lib/process-groups";
 import { AGUIRenderer } from "@/components/agui";
+import { deriveInputHistory, EMPTY_INPUT_HISTORY, historyDown, historyUp, resetInputHistory, shouldHandleHistoryKey, type InputHistoryState } from "@/lib/input-history";
+import { formatQuote, isQuotableSelection, joinQuoteAndContent } from "@/lib/quote";
+import { isSubagentListTool } from "@/lib/tool-registry";
 import type { AGUILayout } from "@/components/agui/types";
 import { ProcessTimeline } from "./process-timeline";
 import type { ChatModel, Message, Session } from "./types";
@@ -53,6 +56,20 @@ function detectTrigger(text: string, pos: number): SuggestState {
     }
   }
   return null;
+}
+
+/**
+ * 判断光标是否停在文本的第一行。
+ *
+ * 输入历史只在第一行抢 ↑ / ↓：多行输入里这两键是移动光标，
+ * 抢占后长文本就没法用键盘微调了。做法是看光标之前是否还有换行。
+ */
+function isCaretOnFirstLine(textarea: HTMLTextAreaElement | null): boolean {
+  if (!textarea) return false;
+  const caret = textarea.selectionStart ?? 0;
+  // 有选区时让位：用户可能在多行里选了一段，↑↓ 应当移动光标而非翻历史。
+  if ((textarea.selectionEnd ?? 0) !== caret) return false;
+  return !textarea.value.slice(0, caret).includes("\n");
 }
 
 // ---- 对话列宽（可拖拽，同时作用于消息区与输入框） ----
@@ -172,6 +189,7 @@ function ChatPage({
   onSend,
   onNewSession,
   onRetry,
+  onContinue,
   onStop,
   onAnswer,
   tools,
@@ -199,6 +217,8 @@ function ChatPage({
   onSend: (content: string, attachments: File[], tools: string[], skillRef?: { id: string; name: string }, sessionRefs?: { id: string; title: string }[]) => void;
   onNewSession: () => void;
   onRetry: (id: string) => void;
+  /** 继续被中断的回复：接续式续写，保留已输出内容（与「重试」的丢弃式语义相反） */
+  onContinue: (id: string) => void;
   onAnswer: (assistantMessageId: string, answer: string) => void;
   onStop: () => void;
   tools: string[];
@@ -216,6 +236,10 @@ function ChatPage({
   // 首次打开时会话历史仍在从 IndexedDB 恢复：用骨架占位，避免先闪一下「开始对话」
   messagesLoading?: boolean;
 }) {
+  // 输入历史游标（↑ 翻历史、↓ 回草稿）：状态与规则都在 lib/input-history，
+  // 这里只负责把它接到键盘事件上。历史直接由当前会话的 user 消息派生，不额外持久化。
+  const [historyCursor, setHistoryCursor] = useState<InputHistoryState>(EMPTY_INPUT_HISTORY);
+  const inputHistory = useMemo(() => deriveInputHistory(messages), [messages]);
   const [input, setInput] = useState("");
   // —— 对话列宽（可拖拽）——
   // columnWidth 同时作用于消息区与输入框的 max-width，保证两者等宽；
@@ -277,6 +301,67 @@ function ChatPage({
   const [notice, setNotice] = useState("");
   // 删除 `$token` 把光标放回触发点：记录待设置的光标位置，input 更新后由 effect 落位。
   const pendingCaretRef = useRef<number | null>(null);
+  // 划选引用：选中回答里的文字后浮出「引用」按钮，点一下把这段拼成 `> ...` 引用块
+  // 插到输入框开头。位置取选区末端的视口坐标，null 表示当前没有可选中的内容。
+  // 只在消息区（viewportRef）内触发，输入框自己的选区不参与 —— 那是正常编辑。
+  const [quoteAnchor, setQuoteAnchor] = useState<{ x: number; y: number; text: string } | null>(null);
+  const viewportRef = useRef<HTMLDivElement>(null);
+
+  // 监听选区变化：只在选中的是**消息区内的回答正文**时浮出引用按钮。
+  // 用 selectionchange 而不是 mouseup：双击选词、三击选段、键盘 Shift+方向键
+  // 都不会触发 mouseup，只监听鼠标会漏掉这些路径。
+  useEffect(() => {
+    const handler = () => {
+      const selection = window.getSelection();
+      const text = selection?.toString() ?? "";
+      const viewport = viewportRef.current;
+      // 没有选区 / 选区太短 / 不在消息区内 → 收起按钮。
+      if (!isQuotableSelection(text) || !selection || selection.rangeCount === 0 || !viewport) {
+        setQuoteAnchor(null);
+        return;
+      }
+      const range = selection.getRangeAt(0);
+      const anchorNode = range.commonAncestorContainer;
+      const element = anchorNode.nodeType === Node.ELEMENT_NODE
+        ? (anchorNode as Element)
+        : anchorNode.parentElement;
+      // 选区必须落在消息区里；落在输入框、侧栏等位置时不算引用。
+      if (!element || !viewport.contains(element)) {
+        setQuoteAnchor(null);
+        return;
+      }
+      const rect = range.getBoundingClientRect();
+      if (rect.width === 0 && rect.height === 0) {
+        setQuoteAnchor(null);
+        return;
+      }
+      setQuoteAnchor({ x: rect.right, y: rect.bottom, text });
+    };
+    document.addEventListener("selectionchange", handler);
+    // 滚动 / 窗口尺寸变化会让 fixed 坐标失效（按钮与选区错位），直接收起。
+    // capture: true 是为了同时捕获消息区内部的滚动（ScrollArea 的滚动发生在内层容器）。
+    const dismiss = () => setQuoteAnchor(null);
+    window.addEventListener("scroll", dismiss, true);
+    window.addEventListener("resize", dismiss);
+    return () => {
+      document.removeEventListener("selectionchange", handler);
+      window.removeEventListener("scroll", dismiss, true);
+      window.removeEventListener("resize", dismiss);
+    };
+  }, []);
+
+  // 把选中的文字拼成引用块插到输入框开头。
+  // 优先插到最前面而不是光标处：引用是「针对这段内容提问」的语境，
+  // 放在最前符合阅读顺序；已有草稿时追加在其后，不覆盖用户正在写的内容。
+  const applyQuote = (text: string) => {
+    const quote = formatQuote(text);
+    if (!quote) return;
+    setInput(prev => joinQuoteAndContent(quote, prev));
+    setQuoteAnchor(null);
+    // 清掉页面上的选区，避免按钮再次浮出（内容已经被搬进输入框）。
+    window.getSelection()?.removeAllRanges();
+    textareaRef.current?.focus();
+  };
   // 右侧子进程面板：activeSubagent 为当前选中的子进程（null 时面板关闭）。
   // 数据从消息的工具调用段聚合而来，不额外请求后端。
   const [activeSubagent, setActiveSubagent] = useState<SubagentRun | null>(null);
@@ -287,7 +372,6 @@ function ChatPage({
   const { openPreview } = useContext(PreviewContext);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const viewportRef = useRef<HTMLDivElement>(null);
   const [stickToBottom, setStickToBottom] = useState(true);
   // —— 主内容区宽度观测：窗口缩放或侧栏收放后判断是否还值得显示列宽把手 ——
   // 太窄时把手贴在边上既不好拖也没意义（列已经被容器压到最小），直接不渲染。
@@ -387,6 +471,8 @@ function ChatPage({
     extraCountRef.current = 0;
     loadingEarlyRef.current = false;
     prevScrollRef.current = null;
+    // 会话变了，历史条目整份换掉：游标残留会把新会话的下标指到别的条目上。
+    setHistoryCursor(resetInputHistory());
   }, [session?.id]);
 
   // 取最后一条助手消息的内容长度，用于感知流式输出增长。
@@ -595,6 +681,9 @@ function ChatPage({
     setSuggest(null);
     setSuggestIndex(0);
     setInput("");
+    // 发出去就退出历史：否则用户接着按 ↑ 会看到刚发的那条，光标却停在历史里
+    // 而不是草稿位，下一次输入会被历史条目覆盖。
+    setHistoryCursor(resetInputHistory());
     clearAttachments();
     if (textareaRef.current) textareaRef.current.style.height = "44px";
   };
@@ -623,6 +712,25 @@ function ChatPage({
           ) : null}
         <ScrollArea viewportRef={viewportRef} className="min-h-0 flex-1 bg-white dark:bg-card">
       {/* 消息区与输入框共用同一个 maxWidth（columnWidth），拖拽时一起变宽/变窄 */}
+        {/* 划选引用浮出按钮：fixed 定位在选区右下角，跟随页面滚动不重算坐标
+            （选区由用户刚划出，此时页面通常没在滚；滚动后按钮会随选区一起「错位」，
+            窗口滚动 / 尺寸变化时主动收起——见下面的 effect）。 */}
+        {quoteAnchor ? (
+          <button
+            type="button"
+            // 用 mousedown 而不是 click：点击时浏览器会先清空选区，
+            // click 触发时 selection.toString() 已经变空，拿不到要引用的文字。
+            onMouseDown={event => {
+              event.preventDefault();
+              applyQuote(quoteAnchor.text);
+            }}
+            style={{ position: "fixed", left: quoteAnchor.x + 6, top: quoteAnchor.y + 6 }}
+            className="z-50 flex items-center gap-1 rounded-md border border-border bg-card px-2 py-1 text-[11px] font-medium text-foreground shadow-md transition-colors hover:bg-muted"
+          >
+            <Quote size={11} />
+            引用
+          </button>
+        ) : null}
       <div className="mx-auto space-y-6 px-4 py-6 sm:px-6" style={{ maxWidth: columnWidth }}>
         {/* 向上增量加载更早消息：给出可见反馈（此前是静默 setExtraCount，界面只「卡一下」） */}
         {loadingEarly ? (
@@ -652,10 +760,9 @@ function ChatPage({
             <div className="min-w-0">
               {message.segments?.length ? (
                 <div className="space-y-2.5">
-                  {groupSegments(message.segments, {
-                    // 子 Agent / 子任务列表有专用卡片，不进过程时间线（否则会丢卡片功能）
-                    isSpecialTool: name => name === "akm_subagent_list" || isSubagentTool(name),
-                  }).map(block => {
+                  {/* 工具是否进过程时间线由 lib/tool-registry 统一判定，
+                      这里不再逐个写工具名（此前在此重复了一遍子 Agent 名单）。 */}
+                  {groupSegments(message.segments).map(block => {
                     if (block.kind === "process") {
                       // 过程时间线：连续的思考/工具段聚合为一条可折叠步骤流。
                       // 展开策略：进行中默认展开（能看到当前做到哪一步），
@@ -680,6 +787,7 @@ function ChatPage({
                           open={processOpen}
                           onToggle={() => onToggleProcess?.(message.id, blockKey, !processOpen)}
                           runDurationMs={runDurationMs}
+                          firstTokenMs={message.firstTokenMs ?? 0}
                         />
                       );
                     }
@@ -695,7 +803,7 @@ function ChatPage({
                     }
                     if (block.kind === "special") {
                       const segment = block.segment;
-                      if (segment.name === "akm_subagent_list") {
+                      if (isSubagentListTool(segment.name)) {
                         // 子任务列表工具段：渲染为列表卡片，点击在右侧面板查看全部子任务概要
                         return (
                           <SubagentListCard
@@ -714,22 +822,13 @@ function ChatPage({
                         />
                       );
                     }
-                    // —— 正文块：拆出可能存在的"流式开放围栏" ——
-                    // renderable 为定稿正文，openFence 为还在生成的代码块（闭合前灰化显示 + ▌光标）。
-                    const view = splitSegmentForRender(block.content);
-                    // 正文没有可见字符（空 / 纯空白）时不渲染空白气泡，避免出现空框。
-                    if (!view.renderable.trim() && !view.openFence) return null;
+                    // —— 正文块 ——
+                    // 打字机揭示 + 拆开放围栏都在 SmoothSegmentBody 里完成：揭示必须作用于
+                    // 整段原文（见其注释中的顺序说明），所以这里不再先拆围栏。
+                    // 空正文（空 / 纯空白）由该组件自己返回 null，不会渲染空框。
                     return (
                       <Fragment key={`text-${block.segmentIndex}`}>
-                        {view.renderable.trim() ? (
-                          <div className="min-w-0 [overflow-wrap:anywhere]">
-                            <MemoMarkdown content={view.renderable} />
-                          </div>
-                        ) : null}
-                        {/* 仍在流式生成的代码块：渐进式展示（灰化 + 尾部 ▌ 光标闪烁） */}
-                        {view.openFence && message.status === "sending" ? (
-                          <StreamingCodeBlock fenceLine={view.openFence.fenceLine} code={view.openFence.code} />
-                        ) : null}
+                        <SmoothSegmentBody content={block.content} streaming={message.status === "sending"} />
                         {message.citations && block.segmentIndex === message.segments!.length - 1 ? <CitationsBlock citations={message.citations} /> : null}
                       </Fragment>
                     );
@@ -746,7 +845,7 @@ function ChatPage({
                 </div>
               ) : (
                 <>
-                  {message.thinking && <ThinkingBlock text={message.thinking} defaultOpen={messageIndex === lastAssistantIndex} />}
+                  {message.thinking && <ThinkingBlock text={message.thinking} defaultOpen={messageIndex === lastAssistantIndex} streaming={message.status === "sending"} />}
                   {message.functionCalls && <FunctionCallBlock calls={message.functionCalls} />}
                   {message.compactSummary ? (
                     <div className="min-w-0 rounded-xl border border-dashed border-primary/40 bg-primary/5 px-4 py-3 shadow-sm [overflow-wrap:anywhere]">
@@ -766,6 +865,22 @@ function ChatPage({
                 </>
               )}
               {message.status === "recv_failed" && <StatusNotice status="recv_failed" error={message.error} onRetry={() => onRetry(message.id)} />}
+              {/* 被「停止」中断的回复：已输出内容保留，给一个「继续」入口接着往下写。
+                  与 recv_failed 的「重试」区分：重试会丢弃重来，继续是原地续写。 */}
+              {message.stopped && message.status !== "sending" ? (
+                <div className="mt-1.5 flex items-center gap-2 px-0.5 text-xs text-muted-foreground">
+                  <span>已停止</span>
+                  {/* 全局只允许一条回复在跑：有发送中的消息时禁用，避免两个请求写同一条消息 */}
+                  <button
+                    type="button"
+                    onClick={() => onContinue(message.id)}
+                    disabled={isReplyPending}
+                    className="rounded px-1.5 py-0.5 text-[11px] font-medium text-primary transition-colors hover:bg-primary/10 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    继续
+                  </button>
+                </div>
+              ) : null}
               <ContextHint compacted={message.compacted} />
               {/* AI 提出的澄清问题：asking 状态可输入回答，回答后只读展示 */}
               {message.askUser ? <AskUserCard question={message.askUser.question} options={message.askUser.options} multiple={message.askUser.multiple} active={message.status === "asking"} onSubmit={answer => onAnswer(message.id, answer)} /> : null}
@@ -936,6 +1051,33 @@ placeholder={isReplyPending ? "回复生成中，可输入引导，将在自然�
                   event.preventDefault();
                   setSuggest(null);
                   setSuggestIndex(0);
+                  return;
+                }
+              }
+              // 输入历史翻页：只在「弹层没开、非输入法合成、光标在第一行」时接管 ↑↓。
+              // 判断都放在 lib/input-history 里（shouldHandleHistoryKey），这里只做接线。
+              const wantsHistory = event.key === "ArrowUp" || event.key === "ArrowDown";
+              if (
+                wantsHistory &&
+                shouldHandleHistoryKey({
+                  suggestOpen: suggest !== null,
+                  composing: event.nativeEvent.isComposing,
+                  caretAtFirstLine: isCaretOnFirstLine(event.currentTarget),
+                })
+              ) {
+                const next = event.key === "ArrowUp"
+                  ? historyUp(historyCursor, input, inputHistory)
+                  : historyDown(historyCursor, input, inputHistory);
+                // 只有真正翻动了才吞掉按键：历史为空 / 停在边界时保持浏览器默认行为，
+                // 否则会出现「按了没反应，光标也不动」的死键。
+                if (next.state !== historyCursor) {
+                  event.preventDefault();
+                  setHistoryCursor(next.state);
+                  setInput(next.text);
+                  // 历史条目可能很长：填进去后按内容重算高度，避免只显示一行。
+                  const textarea = event.currentTarget;
+                  textarea.style.height = "auto";
+                  textarea.style.height = `${Math.min(textarea.scrollHeight, 160)}px`;
                   return;
                 }
               }

@@ -3,7 +3,7 @@ import { AlertCircle, Bot, Brain, ChevronRight, FileText, Globe, Image as ImageI
 import { cn } from "@/lib/utils";
 import type { MessageBlock, ProcessStep } from "@/lib/process-groups";
 import { describeStep, describeStepTarget, formatDuration, summarizeStepResult, summarizeThinking } from "@/lib/step-labels";
-import { MemoMarkdown } from "./markdown";
+import { SmoothMarkdown } from "./markdown";
 
 /**
  * 过程时间线：把一轮里的「思考 + 工具调用」收成一条可折叠的步骤流。
@@ -98,12 +98,17 @@ function stepStatusLabel(step: ProcessStep): { text: string; className: string }
   return { text: "完成", className: "text-muted-foreground" };
 }
 
-/** 单步详情：思考正文用 Markdown（不限高）；工具参数/结果用 JSON（限高内滚）。 */
+/**
+ * 单步详情：思考正文用 Markdown（不限高）；工具参数/结果用 JSON（限高内滚）。
+ *
+ * 思考步进行中（`endedAt` 缺失）时走打字机揭示：思考 token 往往一次好几个字，
+ * 直接渲染会成块跳出。已结束的思考步一步到位，不重播动画。
+ */
 function StepDetail({ step }: { step: ProcessStep }) {
   if (step.kind === "thinking") {
     return (
       <div className="mt-1 mb-1.5 text-[13px] leading-relaxed text-muted-foreground [&_li]:text-[13px] [&_p]:text-[13px]">
-        <MemoMarkdown content={step.content} />
+        <SmoothMarkdown content={step.content} streaming={typeof step.endedAt !== "number"} />
       </div>
     );
   }
@@ -172,6 +177,7 @@ export function ProcessTimeline({
   open,
   onToggle,
   runDurationMs = 0,
+  firstTokenMs = 0,
 }: {
   block: ProcessBlock;
   /** 是否展开（受控）：进行中默认展开、结束后默认收起，状态由消息持久化 */
@@ -179,6 +185,11 @@ export function ProcessTimeline({
   onToggle: () => void;
   /** 整轮耗时（毫秒）：优先于组内耗时，0 表示无数据不显示时长 */
   runDurationMs?: number;
+  /**
+   * 首字延迟（毫秒）：发出 → 屏幕上出现第一个字。
+   * 0 表示无数据，此时不显示 —— 宁可少一个指标，也不显示「首字 0ms」这种错数。
+   */
+  firstTokenMs?: number;
 }) {
   // 总时长口径：整轮耗时 > 组内首末步跨度 > 0（无数据）
   const totalMs = runDurationMs > 0 ? runDurationMs : block.durationMs;
@@ -193,6 +204,9 @@ export function ProcessTimeline({
     : totalMs > 0
       ? `已处理完 ${formatDuration(totalMs)}`
       : "已处理完";
+  // 首字延迟只在回合结束后显示：进行中它还没定值（第一个字可能还没到），
+  // 显示一个「还在长」的数字会让人以为那是最终值。
+  const firstTokenText = !block.hasRunning && firstTokenMs > 0 ? `首字 ${formatDuration(firstTokenMs)}` : "";
 
   return (
     /* mb-2：与下方正文留一点呼吸（消息区还有 space-y-2.5，合计约 18px） */
@@ -211,6 +225,8 @@ export function ProcessTimeline({
         )}
         <span className="shrink-0 text-[13px] font-medium text-foreground/85">{block.stepCount} 个步骤</span>
         <span className="shrink-0 text-[12px] text-muted-foreground">{statusText}</span>
+        {/* 首字延迟：弱化显示在整轮耗时之后，不加分隔符（用更淡的颜色区分即可） */}
+        {firstTokenText ? <span className="shrink-0 text-[11.5px] text-muted-foreground/70">{firstTokenText}</span> : null}
         {errorCount > 0 ? (
           <span className="shrink-0 rounded-sm bg-red-50 px-1 text-[10.5px] text-red-600 dark:bg-red-950/40 dark:text-red-400">
             {errorCount} 步失败

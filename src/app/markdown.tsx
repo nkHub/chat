@@ -5,9 +5,11 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import "katex/dist/katex.min.css";
 import { Brain, Check, Copy } from "lucide-react";
-import { nodeToText } from "./helpers";
+import { nodeToText, splitSegmentForRender } from "./helpers";
 import { PreviewContext } from "./preview";
 import { highlightCode } from "@/lib/code-highlight";
+import { splitMarkdownBlocks } from "@/lib/markdown-blocks";
+import { useSmoothText } from "./use-smooth-text";
 
 const MARKDOWN_COMPONENTS: Components = {
   h1: ({ node: _node, ...props }) => <h1 className="mb-1 mt-3 text-lg font-semibold text-foreground" {...props} />,
@@ -123,10 +125,80 @@ function renderMarkdown(text: string, components: Components = MARKDOWN_COMPONEN
   );
 }
 
-// 记忆化 Markdown 渲染：仅当内容变化时才重新解析，避免消息列表全量重渲染时重复解析未变化的消息。
-const MemoMarkdown = memo(function MemoMarkdown({ content, components }: { content: string; components?: Components }) {
-  return <div>{renderMarkdown(content, components)}</div>;
+// Markdown 按块切分的纯逻辑在 lib/markdown-blocks（可用 npm run check:markdown 断言），
+// 这里只负责渲染。
+
+/**
+ * 单块 Markdown 渲染（被 memo 记住的单元）。
+ *
+ * key 由父组件给成块内容本身：内容不变则不会重渲染，也就不会重解析。
+ */
+const MarkdownBlock = memo(function MarkdownBlock({ content, components }: { content: string; components?: Components }) {
+  return <>{renderMarkdown(content, components)}</>;
 });
+
+// 记忆化 Markdown 渲染：仅当内容变化时才重新解析，避免消息列表全量重渲染时重复解析未变化的消息。
+//
+// 这里额外做**按块 memo**：流式正文每帧都在变，整段一次性交给 ReactMarkdown
+// 会让 remark + rehype 每帧全量重跑（长回答 + 表格时代价很高）。切成块之后
+// 前面各块文本不变、命中 memo，只有末尾块参与重解析。
+// 块之间用空行拼接还原，因此渲染结果与原整段解析一致。
+const MemoMarkdown = memo(function MemoMarkdown({ content, components }: { content: string; components?: Components }) {
+  const blocks = splitMarkdownBlocks(content);
+  return (
+    <div>
+      {blocks.map((block, index) => (
+        <MarkdownBlock key={`${index}-${block}`} content={block} components={components} />
+      ))}
+    </div>
+  );
+});
+
+/**
+ * 带打字机揭示的 Markdown 正文（仅渲染成 Markdown，不拆围栏）。
+ *
+ * 为什么不直接在 `MemoMarkdown` 里调 hook：正文块是在 `groupSegments(...).map()`
+ * 的回调里渲染的，历史消息也不该重播动画。拆成独立组件后，只有显式用它的地方
+ * （流式正文、进行中的思考步）才有揭示成本，其余路径零变化。
+ *
+ * 揭示必须在切块**之前**作用于原始文本：先交给 `useSmoothText` 拿到前缀，
+ * 再交给 `MemoMarkdown` 按块 memo。反过来先切块再揭示会把 `splitMarkdownBlocks`
+ * 的稳定块判据打碎（每帧块内容都在变），memo 就失效了。
+ */
+function SmoothMarkdown({ content, streaming, components }: { content: string; streaming: boolean; components?: Components }) {
+  const revealed = useSmoothText(content, streaming);
+  return <MemoMarkdown content={revealed} components={components} />;
+}
+
+/**
+ * 流式正文段：打字机揭示 + 拆出开放围栏 + 分别渲染。
+ *
+ * 顺序很关键 —— 揭示作用于**整段原文**，再从揭示出的前缀里拆围栏。
+ * 反过来（先拆围栏、只揭示 renderable）会在围栏闭合那一刻出问题：
+ * `renderable` 突然从「围栏前正文」变成「正文 + 完整代码块」，多出来的代码
+ * 会被当作新到达的文字再打一遍，视觉上代码块凭空重放。
+ *
+ * 这里返回 null 的判据与原先在 chat.tsx 里的一致：定稿正文与开放围栏都空时，
+ * 不渲染空白气泡。
+ */
+function SmoothSegmentBody({ content, streaming }: { content: string; streaming: boolean }) {
+  const revealed = useSmoothText(content, streaming);
+  const view = splitSegmentForRender(revealed);
+  if (!view.renderable.trim() && !view.openFence) return null;
+  return (
+    <>
+      {view.renderable.trim() ? (
+        <div className="min-w-0 [overflow-wrap:anywhere]">
+          <MemoMarkdown content={view.renderable} />
+        </div>
+      ) : null}
+      {/* 仍在流式生成的代码块：渐进式展示（灰化 + 尾部 ▌ 光标闪烁） */}
+      {view.openFence && streaming ? (
+        <StreamingCodeBlock fenceLine={view.openFence.fenceLine} code={view.openFence.code} />
+      ) : null}
+    </>
+  );
+}
 
 // 思考过程的 Markdown 组件映射：与正文（MARKDOWN_COMPONENTS）区分，整体走淡紫色调，深色模式下同步加深。
 const THINKING_COMPONENTS: Components = {
@@ -176,7 +248,9 @@ const THINKING_COMPONENTS: Components = {
 
 // 思考过程折叠块：默认展开状态由 defaultOpen 决定（最新消息默认展开），
 // 展开/收起状态由组件内部记忆，重新渲染不会重置。
-function ThinkingBlock({ text, defaultOpen = false }: { text: string; defaultOpen?: boolean }) {
+// streaming 为 true 时正文走打字机揭示：思考 token 经常一次好几个字，
+// 直接渲染会成块跳出；历史消息则一步到位，不重播。
+function ThinkingBlock({ text, defaultOpen = false, streaming = false }: { text: string; defaultOpen?: boolean; streaming?: boolean }) {
   const [open, setOpen] = useState(defaultOpen);
   return (
     <details open={open} className="mb-2.5 overflow-hidden rounded-lg border border-violet-200 bg-violet-50/60 dark:border-violet-800/40 dark:bg-violet-950/40">
@@ -186,10 +260,10 @@ function ThinkingBlock({ text, defaultOpen = false }: { text: string; defaultOpe
         <span className="ml-auto text-xs text-muted-foreground">{open ? "收起" : "展开"}</span>
       </summary>
       <div onClick={() => setOpen(false)} className="border-t border-violet-200 px-3 pb-3 pt-2 leading-relaxed dark:border-violet-800/40">
-        <MemoMarkdown components={THINKING_COMPONENTS} content={text} />
+        <SmoothMarkdown components={THINKING_COMPONENTS} content={text} streaming={streaming} />
       </div>
     </details>
   );
 }
 
-export { MARKDOWN_COMPONENTS, CodeBlock, StreamingCodeBlock, renderMarkdown, MemoMarkdown, THINKING_COMPONENTS, ThinkingBlock };
+export { MARKDOWN_COMPONENTS, CodeBlock, StreamingCodeBlock, renderMarkdown, MemoMarkdown, SmoothMarkdown, SmoothSegmentBody, THINKING_COMPONENTS, ThinkingBlock };

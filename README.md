@@ -18,6 +18,14 @@ npm run build
 
 # 本地预览构建产物
 npm run preview
+
+# 纯逻辑自检（无测试框架，esbuild + node 直接跑断言）
+npm run check:history    # 会话历史分页 / 搜索
+npm run check:timeline   # 段分组与耗时口径
+npm run check:markdown   # Markdown 按块切分（切分无损 / 稳定块 / 危险边界）
+npm run check:input      # 输入框 ↑↓ 历史游标（草稿保护 / 边界 / 让位规则）
+npm run check:quote      # 划选引用（每行加 >、空行、截断、拼接留空行）
+npm run check:smooth     # 流式文本打字机揭示（逐字排空 / 时间累积 / 提交限流）
 ```
 
 打包给 AKM `agent_chat` 插件时**必须**带两个环境变量，缺一个就出错：
@@ -38,12 +46,18 @@ VITE_BASE='./' VITE_AKM_API_URL='' npm run build
 ## 功能
 
 ### 对话
-- 流式输出：思考（reasoning）与正文分段展示；一轮内的思考与工具调用聚合为一条**可折叠过程时间线**（`N 个步骤 已处理完 X.Xs`，每步为人话动作 + 结果摘要 + 耗时，点开可看原始参数/结果）
+- 流式输出：思考（reasoning）与正文分段展示；**段边界由服务端结算**（`reasoning_start/end`、`text_start/end`），前端只按事件开段/关段，不再靠「下一个事件是思考还是正文」反推上一段何时结束 —— 每步耗时取服务端 `ts`，不含网络抖动；一轮内的思考与工具调用聚合为一条**可折叠过程时间线**（`N 个步骤 已处理完 X.Xs`，每步为人话动作 + 结果摘要 + 耗时，点开可看原始参数/结果）
 - 支持附件上传（图片转 `image_url`、文本按 UTF-8 读取，经 multipart 提交）
 - 消息懒渲染 + 向上加载历史；失败可重试
 - 回复进行中的输入：不并发发送，而是挂起为**中途引导**（等 `turn_pause` 自然停顿点插入，见 `App.tsx` 的 `pendingGuideRef`）；挂起条右侧三个操作：「立即发送」（中断当前轮并立刻发出，已输出内容保留）、「撤回输入框」（连附件一起回到输入框继续改）、「撤消」
 - 上下文自动压缩提示（服务端压缩后展示次数）
 - Markdown 代码块语法高亮：highlight.js 按需注册 27 种语言（前端 / Python / PHP / Java / Go / Rust 系 / shell / SQL / YAML 等），未知或未标注语言回落纯文本；流式未闭合的围栏也会边生成边着色（见 `src/lib/code-highlight.ts`，配色在 `theme.css` 的 `.code-hl` 段）
+- 输入框 **↑↓ 翻历史**：↑ 翻出最近发过的消息、↓ 翻回草稿。历史直接由当前会话的 user 消息派生（不额外持久化）；规则在 `src/lib/input-history.ts`（`npm run check:input` 断言）。三条刻意的保守约束：进入历史前把当前输入存为草稿、翻回底部原样还原；只在**光标处于第一行**且弹层未开、输入法未 composing 时接管 ↑↓（多行编辑里它们是移动光标）；历史为空或停在边界时不吞按键，避免变成「按了没反应、光标也不动」的死键
+- Markdown **按块 memo**：正文按空行切成块后逐块渲染（`src/lib/markdown-blocks.ts`），流式追加时只有末尾块重解析，前面已完成的块命中 `React.memo`，长回答 + 表格时不再每帧全量 remark/rehype。切分保证 `join(split(x)) === x`，且松散列表 / 表格 / 引用块 / 未闭合围栏等**会跨空行合并**的边界不切（用 `npm run check:markdown` 断言）
+- 流式正文**打字机揭示**（移植 assistant-ui 的 `useSmooth`）：把「已到达全文」当目标、「已展示前缀」当游标，每帧揭示几个字符，突发多字不再成块跳变。算法在 `src/lib/text-stream-animator.ts`（纯逻辑、时间由调用方传入，`npm run check:smooth` 断言排空时长 / 时间累积 / 单帧上限 / 提交限流），调度在 `src/app/use-smooth-text.ts`（rAF + `prefers-reduced-motion`）。揭示作用于**整段原文**再交给按块 memo，历史消息与已结束的回合一律直接显示全文、不重播
+- 划选引用：在回答里选中一段文字 → 浮出「引用」按钮 → 点一下把这段拼成 `> ...` 引用块插到输入框开头，可随后接自己的提问。规则在 `src/lib/quote.ts`（`npm run check:quote` 断言）：每行都加 `>` 保证多行仍是一个 blockquote、空行输出裸 `>`、超长截断并补省略号、与提问之间留空行（否则用户的字会被 Markdown 当成引用的惰性续行）。用 `mousedown` 而非 `click` 取选区（点击时浏览器已清空选区，`click` 里读不到文字）；滚动或窗口尺寸变化时收起按钮，避免 fixed 坐标与选区错位
+- **首字延迟**：过程时间线折叠头部在整轮耗时后显示「首字 X.Xs」，即「发出 → 屏幕上出现第一个字」。只算正文或思考的首个 delta（不认 `text_start`/`reasoning_start`：段开始可能早于真实 token，拿它算会把模型空等时间算漏）。拿不到就不显示，不显示 0
+- 停止后可**继续**：点「停止」保留已输出内容并给「继续」按钮，模型从断点往下写（接续式）。与「重试」的丢弃式语义相反 —— 重试删掉旧回答重新生成，继续复用已有 segments 走 `resumeExisting` 分支，不会插入第二个同 id 气泡
 
 ### 会话管理
 - 新建 / 切换 / 重命名 / 删除会话，侧栏直接拖拽排序
@@ -103,6 +117,7 @@ Agent 服务端已彻底移除对话历史落盘；旧版本遗留的 `~/.akm/ag
 - 过程时间线展开策略：思考步生成中默认展开、结束自动折叠；工具步始终默认折叠；手动点过即固定
 - 结构化布局：配置 `agent_layout_model` 后，回答的正文**保持不变**，卡片作为补充追加在正文下方（表格/指标/对比/图表等）；`akm.layout` 事件在 `final` 之后补发，正文先落地、卡片后到，失败即回落纯 markdown。**不提供「原文 / 卡片」切换**（渲染器第一帧锁定，切换等于中途换渲染器）
 - 渲染工具模式：配置 `agent_render_enabled`（服务端，默认关闭）后主 Agent 可直接调 `akm_render` 出卡片，组件 schema 来自服务端 `render_schema.json`；卡片在工具调用的位置**原位渲染**，时间线里不显示这一步；与后置的 `agent_layout_model` 模式互斥
+- 工具展示位次集中登记：`src/lib/tool-registry.ts` 用一张表声明每个工具的 `display`（`inline` 进时间线 / `standalone` 专用卡片 / `hidden` 原位成卡片）。此前工具名散在 `agent-api.ts`（schema）、`process-groups.ts`（`HIDDEN_RENDER_TOOLS`）、`chat.tsx`（`isSpecialTool` 谓词）、`subagent.tsx`（子 Agent 名单）四处各写一遍，新增一个带 UI 的工具要改四个文件且容易漏；现在渲染侧不再出现具体工具名，未登记的工具默认 `inline`
 - 气泡与层次：用户消息气泡最宽 `80%`（长消息不会与整列齐平）；过程时间线展开的思考正文与工具 JSON 用 `text-muted-foreground` 一档更灰，与正文拉开层次
 - 卡片暗色适配：自绘卡片（stats / cards / kanban / alert / progress / map / chart）的配色映射表全部补 `dark:`（`bg-*-50` → `dark:bg-*-500/10`、`text-*-700` → `dark:text-*-300`），卡片壳 `bg-white` → `bg-card`；图表色改用 `stroke-chart-N`/`fill-chart-N` 类（SVG 的 `fill`/`stroke` attribute 不认 `var()`），轴标签 `fill="currentColor"` + `text-muted-foreground`，图例与 tooltip 走 `--muted-foreground` / `--popover`；地图 4 套 6 档热力色阶在暗色下改为同色相透明度叠层
 - 渲染工具模式补充：开启后服务端自动注入渲染指引（否则模型不会主动调）；单次上限 3 块、鼓励分次调用；卡片淡入 300ms（`motion-safe`，尊重 reduced-motion）

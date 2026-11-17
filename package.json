@@ -8,6 +8,10 @@
     "build": "tsc -b && vite build",
     "check:history": "mkdir -p /tmp/shcheck && esbuild src/lib/session-history.ts --format=esm --outfile=/tmp/shcheck/session-history.mjs --log-level=error && node scripts/check-session-history.mjs",
     "check:timeline": "node scripts/check-process-timeline.mjs",
+    "check:markdown": "node scripts/check-markdown-blocks.mjs",
+    "check:smooth": "node scripts/check-smooth-text.mjs",
+    "check:input": "node scripts/check-input-history.mjs",
+    "check:quote": "node scripts/check-quote.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

@@ -25,6 +25,9 @@ for (const name of ["process-groups", "step-labels"]) {
     format: "esm",
     outfile: `${OUT_DIR}/${name}.mjs`,
     logLevel: "error",
+    // process-groups 现在依赖 tool-registry（工具展示位次），必须一起打包进产物，
+    // 否则 node 会按裸名解析 tool-registry 而失败。
+    bundle: true,
   });
 }
 
@@ -79,25 +82,37 @@ check("空白思考段被丢弃（不占步骤）", blankThinking.length === 1 &
 const emptyText = groupSegments([text("")]);
 check("空 text 段仍输出（交给渲染层过滤）", emptyText.length === 1 && emptyText[0].kind === "text");
 
-// ---- 分组：special 工具隔离（子 Agent 卡片不能被卷进时间线） ----
-const special = groupSegments([tool("a"), tool("akm_subagent_spawn", {}, null, "running"), tool("b")], {
-  isSpecialTool: name => name === "akm_subagent_spawn",
-});
+// ---- 分组：standalone 工具隔离（子 Agent 卡片不能被卷进时间线） ----
+// 判定由 lib/tool-registry 统一给出，调用方不再传谓词；这里用注册表里真实登记的
+// 工具名验证，顺带守住「登记即生效」这条约定。
+const special = groupSegments([tool("a"), tool("akm_subagent_spawn", {}, null, "running"), tool("b")]);
 check(
-  "special 工具单独成块且打断前后过程组",
+  "standalone 工具单独成块且打断前后过程组",
   special.length === 3 && special[0].kind === "process" && special[1].kind === "special" && special[2].kind === "process",
 );
 check("special 块保留工具名与原下标", special[1].segment.name === "akm_subagent_spawn" && special[1].segmentIndex === 1);
 
-const specialNoOption = groupSegments([tool("akm_subagent_spawn")]);
-check("未传 isSpecialTool 时不做隔离（向后兼容）", specialNoOption.length === 1 && specialNoOption[0].kind === "process");
+// 未登记的工具默认 inline：必须留在过程时间线里，不能被误判成卡片
+const inlineTool = groupSegments([tool("akm_read_file", { path: "a.md" }, null)]);
+check("未登记工具默认 inline（进时间线）", inlineTool.length === 1 && inlineTool[0].kind === "process");
 
-// ---- 状态标记 ----
+// hidden 工具（渲染类）原位成 render 块：不进时间线，也不占步骤
+const hiddenTool = groupSegments([
+  tool("a"),
+  tool("akm_render", {}, '{"ok":true,"layout":{"blocks":[{"type":"stats"}]}}'),
+  tool("b"),
+]);
+check(
+  "hidden 工具原位成 render 块且不进时间线",
+  hiddenTool.length === 3 && hiddenTool[1].kind === "render" && hiddenTool[0].stepCount === 1 && hiddenTool[2].stepCount === 1,
+);
+// 布局解析失败时整段跳过：用户只看到「没有卡片」，不会看到一行裸工具调用
+const hiddenBroken = groupSegments([tool("akm_render", {}, '{"ok":false}')]);
+check("hidden 工具布局不合法 → 整段跳过", hiddenBroken.length === 0);
 const withError = groupSegments([tool("a", {}, '{"error":"boom"}', "error"), tool("b", {}, null, "running")]);
 check("失败步 → hasError", withError[0].hasError === true);
 check("进行中步 → hasRunning", withError[0].hasRunning === true);
 check("全部完成 → hasError/hasRunning 均为 false", mixed[0].hasError === false && mixed[0].hasRunning === false);
-
 // ---- 耗时口径 ----
 check("单步耗时：起止齐全", stepDurationMs({ kind: "tool", startedAt: 100, endedAt: 400 }) === 300);
 check("单步耗时：缺 endedAt → 0", stepDurationMs({ kind: "tool", startedAt: 100 }) === 0);

@@ -1062,7 +1062,28 @@ export function resolveDeclaredTools(tools: string[]): AgentTool[] {
   return declared;
 }
 
-export type AgentStreamEventName = "reasoning_delta" | "model_delta" | "turn_start" | "tool_call" | "tool_result" | "context_warning" | "ask_user" | "client_tool_call" | "turn_pause" | "final" | "error" | "custom";
+// Agent SSE 事件名（对应 AKM /v1/agent 的 run_stream）。
+//
+// 段边界事件（_start / _end）由服务端结算，data 里只有 turn、没有 content：
+// 服务端保证「同一时刻最多一个段处于开启状态」，切段时先下发旧段的 *_end
+// 再下发新段的 *_start，每轮流结束（finish）时结算仍在开启的段。
+// 因此前端只需按事件顺序开段/关段，不再靠「下一个事件是正文还是思考」反推上一段
+// 何时结束 —— 旧实现拿后续事件的 ts 凑思考段结束时刻，段耗时因此带误差。
+export type AgentStreamEventName =
+  | "reasoning_start" | "reasoning_delta" | "reasoning_end"
+  | "text_start" | "model_delta" | "text_end"
+  | "turn_start" | "tool_call" | "tool_result" | "context_warning"
+  | "ask_user" | "client_tool_call" | "turn_pause" | "final" | "error" | "custom";
+
+// 段边界事件集合：这些事件只用于开段/关段，不含文本增量。
+export const SEGMENT_BOUNDARY_EVENTS: ReadonlySet<AgentStreamEventName> = new Set([
+  "reasoning_start", "reasoning_end", "text_start", "text_end",
+]);
+
+/** 是否为段边界事件（不含文本增量，仅开段/关段）。 */
+export function isSegmentBoundaryEvent(name: AgentStreamEventName): boolean {
+  return SEGMENT_BOUNDARY_EVENTS.has(name);
+}
 
 // 上下文占用警告信息（对应后端 context_warning 事件）：
 // 上下文估算已用 / 上限 / 剩余 tokens、占用比例与已压缩次数。
@@ -1121,6 +1142,16 @@ export type AgentStreamEvent = {
     // 快照（messages）。客户端若要在回复中途插入引导，可在收到该事件后携带快照续跑。
   };
 };
+
+// 全部合法事件名：用于 SSE 帧的形状守卫（未知事件名直接丢弃，不影响流）。
+// 与 AgentStreamEventName 手动保持一致 —— 新增事件时必须同时更新两处，
+// 用集合集中一处比原来的长 || 链更易核对。
+const AGENT_STREAM_EVENT_NAMES: ReadonlySet<AgentStreamEventName> = new Set<AgentStreamEventName>([
+  "reasoning_start", "reasoning_delta", "reasoning_end",
+  "text_start", "model_delta", "text_end",
+  "turn_start", "tool_call", "tool_result", "context_warning",
+  "ask_user", "client_tool_call", "turn_pause", "final", "error", "custom",
+]);
 
 // 开发环境默认通过 Vite 代理访问本机 AKM，避免浏览器直接跨源请求被 CORS 拦截。
 // 部署到其它地址时可用 VITE_AKM_API_URL 覆盖，例如 http://127.0.0.1:8800。
@@ -1259,7 +1290,7 @@ export async function compactMessages(options: {
 }
 
 function isAgentStreamEventName(value: unknown): value is AgentStreamEventName {
-  return value === "reasoning_delta" || value === "model_delta" || value === "turn_start" || value === "tool_call" || value === "tool_result" || value === "context_warning" || value === "ask_user" || value === "client_tool_call" || value === "turn_pause" || value === "final" || value === "error" || value === "custom";
+  return typeof value === "string" && AGENT_STREAM_EVENT_NAMES.has(value as AgentStreamEventName);
 }
 
 function parseAgentStreamFrame(frame: string): AgentStreamEvent | null {

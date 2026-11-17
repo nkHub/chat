@@ -16,17 +16,20 @@
  *    两者都没有就返回 0（组件据此不显示时长，而不是显示「0ms」误导用户）。
  */
 
+import { isHiddenTool, isStandaloneTool, registeredToolNames } from "./tool-registry";
 /**
  * 不出现在过程时间线里的工具名：AG-UI 渲染类。
  *
  * 约定（对齐《AG-UI 渲染架构 · 实现规范》第 2.2 / 3.1 节）：卡片是正文的**补充**，
  * 不是工具执行痕迹的一部分。因此即使将来主 Agent 改成直接调用 `render_ui` 工具，
  * 也只在正文下方原位呈现卡片，不在时间线里留一行工具调用。
+ *
+ * 具体名单维护在 `lib/tool-registry.ts`（与「需要专用卡片」的工具同表登记），
+ * 这里保留这个常量名只是为了让本文件的分组逻辑读起来自洽。
  */
-export const HIDDEN_RENDER_TOOLS: ReadonlySet<string> = new Set([
-  "akm_render",
-  "render_ui",
-]);
+export const HIDDEN_RENDER_TOOLS: ReadonlySet<string> = new Set(
+  registeredToolNames().filter(isHiddenTool),
+);
 /** 渲染工具回传的布局：结构由服务端 `layout_schema` 校验过，前端只负责画。 */
 export type RenderLayout = {
   version?: string;
@@ -186,18 +189,16 @@ function toProcessStep(segment: Exclude<ProcessSegmentInput, { type: "text" }>):
  * 规则（刻意保持简单可预期）：
  * - text 段一律独立成块，并**打断**当前过程组的连续性（正文之后的工具是新的一段过程）；
  * - 连续的 thinking / tool 段合成一个过程块；
- * - 命中 `isSpecialTool` 的工具段单独成 special 块并打断分组（例如子 Agent 卡片）；
+ * - 展示位次为 `standalone` 的工具段单独成 special 块并打断分组（子 Agent / 子任务卡片）；
+ * - 展示位次为 `hidden` 的工具段原位替换成渲染卡片（不进时间线、不参与折叠）；
  * - 纯空白的 thinking 段被丢弃（流式起手时会产生空思考段，不该占一行）；
  * - 空字符串的 text 段仍然输出（渲染层按自身规则过滤，避免这里吞掉流式占位）。
  *
+ * 工具展示位次统一查 `lib/tool-registry`，本文件不出现具体工具名。
+ *
  * @param segments 待分组的段序列
- * @param options.isSpecialTool 判定「不该收进时间线、有专用卡片」的工具名
  */
-export function groupSegments(
-  segments: readonly ProcessSegmentInput[],
-  options: { isSpecialTool?: (name: string) => boolean } = {},
-): MessageBlock[] {
-  const isSpecialTool = options.isSpecialTool;
+export function groupSegments(segments: readonly ProcessSegmentInput[]): MessageBlock[] {
   const blocks: MessageBlock[] = [];
   // 当前正在累积的过程组（遇到 text 段即封口）
   let pendingSteps: ProcessStep[] = [];
@@ -241,7 +242,7 @@ export function groupSegments(
       if (layout) blocks.push({ kind: "render", layout, segmentIndex: index });
       return;
     }
-    if (segment.type === "tool" && isSpecialTool?.(segment.name)) {
+    if (segment.type === "tool" && isStandaloneTool(segment.name)) {
       // 有专用卡片的工具（子 Agent / 子任务列表）单独成块，前后过程组各自封口
       flushProcess();
       blocks.push({ kind: "special", segment, segmentIndex: index });

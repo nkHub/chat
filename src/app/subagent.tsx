@@ -2,6 +2,7 @@ import { useState } from "react";
 import { AlertCircle, Check, ChevronRight, Copy, Cpu, List, Loader2, X } from "lucide-react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
+import { registeredToolNames, toolGroup } from "@/lib/tool-registry";
 import type { Message } from "./types";
 
 // ── 子 Agent（子进程）展示 ──────────────────────────────────────────────
@@ -11,8 +12,12 @@ import type { Message } from "./types";
 // 查看该子进程的完整聚合信息（任务号/指令/状态/输出等）；list 渲染为「子任务列表卡片」，
 // 点击在右侧面板查看全部子任务概要。数据仅来自工具调用段本身（params + result），不额外请求后端。
 
-// 子 Agent 工具名集合（按 task_id 归并展示）：用于识别哪些工具段属于子进程调用
-const SUBAGENT_TOOL_NAMES = new Set(["akm_subagent_spawn", "akm_subagent_wait", "akm_subagent_kill", "akm_subagent_status"]);
+// 子 Agent 工具名集合（按 task_id 归并展示）：用于识别哪些工具段属于子进程调用。
+// 名单维护在 lib/tool-registry（与展示位次同表登记），这里按分组过滤取回，
+// 避免「加了新子 Agent 工具却漏改这个 Set」导致卡片退化成时间线里的一行。
+const SUBAGENT_TOOL_NAMES = new Set(
+  registeredToolNames().filter(name => toolGroup(name) === "子 Agent"),
+);
 
 // 单次子进程工具调用（spawn / wait / kill / status 任一段）
 type SubagentCall = {

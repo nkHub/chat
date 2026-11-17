@@ -69,9 +69,17 @@ type Message = {
   segments?: MessageSegment[];
   // 本轮处理耗时（毫秒）：runStartedAt=首个事件到达时刻（服务端 ts 优先），
   // runEndedAt=final 事件时刻。过程时间线的折叠头部「已处理完 X.Xs」用它，
-  // 比组内首末步跨度更接近用户感知的整轮耗时（含最后一次模型输出）。
   runStartedAt?: number;
   runEndedAt?: number;
+  // 首字延迟（毫秒）：runStartedAt → 第一个**可见输出**（正文或思考的首个 delta）。
+  // 这是用户体感上的「等待时间」，与整轮耗时是两个不同指标：
+  // 整轮耗时含最后一次模型输出，首字延迟只算「从发出到屏幕上有反应」。
+  // 拿不到就打点失败（旧服务端 / 纯工具轮），此时不显示而不是显示 0。
+  // 本轮被用户主动停止（不是失败）：已输出内容保留，界面上给出「继续」入口。
+  // 与 recv_failed 分开是因为两者语义不同 —— 停止不是错误，不需要重试整轮，
+  // 只需要在同一轮上接着往下写。
+  stopped?: boolean;
+  firstTokenMs?: number;
   // 过程时间线的折叠状态：key = 该过程块**首段下标**（lib/process-groups 的 segmentIndexes[0]，
   // 与 React key 同一口径），value = 该块是否展开。
   // 一条消息通常有多个过程块（正文会打断分组），必须逐块记录 —— 早先用单个 boolean，
