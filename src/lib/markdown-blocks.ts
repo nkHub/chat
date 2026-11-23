@@ -65,6 +65,8 @@ export function hasOpenFence(text: string): boolean {
  * - 表格：表格行之间允许空行，切开必然裂成两张表；
  * - 引用块：`> a` / 空行 / `> b` 属于同一个 blockquote；
  * - 缩进续行：下一段缩进比上一段更浅或持平且有缩进时，属于上一块的延续（子列表、软换行）；
+ * - 子项结尾接列表项：上一块以缩进行收尾说明那是列表项的子列表，下一块的列表项仍属同一列表，
+ *   切开会把一个列表裂成两个（有序列表还会重置编号）；
  * - 未闭合的代码围栏：围栏内的空行不是块边界；
  * - HTML 块：`<details>` / `<div>` 等跨空行出现时保守合并。
  *
@@ -82,6 +84,9 @@ export function canSplitBetween(prev: string, next: string): boolean {
   // 缩进续行：下一块以缩进开头时，它是上一块列表项 / 段落的延续（子列表、软换行）。
   // 这里只看向下一块 —— 上一块是否也缩进并不影响结论：缩进块总是依附于前面的块。
   if (firstLineIndent(next) > 0) return false;
+  // 上一块以缩进行收尾 = 那个列表项带着子列表；下一块的列表项是它的兄弟项，切开就裂成两个列表。
+  // 有序列表裂开后编号会从 start=2 重新开始，视觉上直接错。
+  if (firstLineIndent(prevLast) > 0 && LIST_ITEM.test(nextFirst.trimStart())) return false;
   // 表格行：两侧都是表格行
   if (prevLast.startsWith("|") && nextFirst.startsWith("|")) return false;
   // 引用块：两侧都是引用行

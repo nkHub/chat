@@ -96,5 +96,48 @@ check("未闭合围栏被识别", hasOpenFence("```js\ncode") === true);
 check("闭合围栏不被误判", hasOpenFence("```js\ncode\n```") === false);
 check("波浪号围栏同样识别", hasOpenFence("~~~\ncode") === true);
 
+// ---- 渲染等价：分块渲染必须与整段渲染一致 ----
+// 这才是真正要保证的不变量。切分无损（join 能还原原文）在排版被切坏时依然成立，
+// 所以上面那些断言抓不到「一个列表被切成两个」「有序列表编号重置」这类问题。
+const { createElement: h } = await import("react");
+const { renderToStaticMarkup } = await import("react-dom/server");
+const ReactMarkdown = (await import("react-markdown")).default;
+const remarkGfm = (await import("remark-gfm")).default;
+const remarkMath = (await import("remark-math")).default;
+const rehypeKatex = (await import("rehype-katex")).default;
+
+const renderMd = (text) =>
+  renderToStaticMarkup(
+    h(ReactMarkdown, {
+      remarkPlugins: [remarkGfm, remarkMath],
+      rehypePlugins: [[rehypeKatex, { strict: false, throwOnError: false }]],
+      children: text,
+    })
+  );
+
+// 块级标签之间的换行是渲染器排版差异，浏览器里不产生视觉区别，归一化后才是「视觉等价」。
+// HTML 块（<details> 等）的差异落在文本节点内部、无法这样归一化，故不放进本组用例。
+const normalizeHtml = (html) => html.replace(/>\s+</g, "><").replace(/\s+/g, " ").trim();
+
+const renderCases = {
+  "嵌套无序列表接兄弟项": "- 父项\n  - 子项一\n  - 子项二\n\n- 第二个父项",
+  "嵌套有序列表接兄弟项": "1. 第一步\n   1. 细节一\n   2. 细节二\n\n2. 第二步",
+  "三层嵌套列表": "- a\n  - b\n    - c\n\n- d",
+  "列表项内代码块": "- 项一\n  ```js\n  const a = 1;\n  ```\n\n- 项二",
+  "长文档大纲": "# 说明\n\n正文。\n\n## 目录\n\n- 第一章\n  - 1.1 背景\n  - 1.2 目标\n\n- 第二章\n  - 2.1 方案\n\n## 附录\n\n| 项 | 说明 |\n| - | - |\n| A | 甲 |\n\n结束语。",
+  "普通长文": "# 标题\n\n段落一。\n\n## 二级\n\n- 项一\n- 项二\n\n```js\nconst a = 1;\n```",
+  "有序松散列表": "1. 第一步\n\n2. 第二步\n\n3. 第三步",
+  "表格接段落": "| a | b |\n| - | - |\n| 1 | 2 |\n\n表格后段落。",
+};
+for (const [name, text] of Object.entries(renderCases)) {
+  const whole = normalizeHtml(renderMd(text));
+  const split = normalizeHtml(splitMarkdownBlocks(text).map(renderMd).join(""));
+  check(`渲染等价：${name}`, whole === split, whole === split ? "" : `\n     整段 ${whole}\n     分块 ${split}`);
+}
+
+// ---- 子项结尾接列表项不切（渲染等价的判据层回归） ----
+check("子项结尾接列表项不切", canSplitBetween("- 父项\n  - 子项", "- 兄弟项") === false);
+check("子项结尾接段落仍切", canSplitBetween("- 父项\n  - 子项", "普通段落。") === true);
+
 console.log(fails === 0 ? "\n全部通过" : `\n${fails} 项失败`);
 if (fails > 0) process.exitCode = 1;
