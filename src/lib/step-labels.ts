@@ -55,6 +55,12 @@ const TOOL_LABELS: Record<string, StepLabel> = {
   // ── 联网与检索 ──
   tavily_search: { action: "联网搜索", tone: "net" },
   akm_search_kb: { action: "检索知识库", tone: "search" },
+  // skill 按需加载：正文以工具结果返回，时间线里只显示「加载 Skill」，
+  // 不显式收录会降级成裸露的 load_skill。
+  akm_load_skill: { action: "加载 Skill", tone: "read" },
+  // MCP 代理：列服务器 / 列工具 / 执行内层工具都由这一个入口完成，
+  // 不显式收录会降级成裸露的 load_mcp。
+  akm_load_mcp: { action: "调用 MCP", tone: "other" },
   // 网页抓取：后端受 agent_fetch_url_enabled 控制（默认关闭），开启后模型才能读外部链接。
   // 必须显式收录，否则会回落到「去掉 akm_ 前缀」的降级路径，在时间线里裸露成 fetch_url。
   akm_fetch_url: { action: "读取网页", tone: "net" },
